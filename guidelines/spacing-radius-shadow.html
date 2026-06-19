@@ -1,0 +1,12 @@
+<!-- @dsCard group="Spacing" viewport="700x150" name="Corners & shadows" subtitle="Sharp 0px by design; shadows only on floating overlays" -->
+<!DOCTYPE html><html><head><meta charset="utf-8"><link rel="stylesheet" href="../styles.css">
+<style>body{margin:0;background:var(--bg-app);padding:24px;font-family:var(--font-sans);display:flex;gap:20px;align-items:center}
+.box{width:80px;height:64px;background:var(--surface-card);border:1px solid var(--border-default);display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-family:var(--font-mono);font-size:10px}
+.lab{font-family:var(--font-mono);font-size:10px;color:var(--text-muted);margin-top:8px;text-align:center}
+.c{display:flex;flex-direction:column;align-items:center}</style></head>
+<body>
+<div class="c"><div class="box">0px</div><div class="lab">--radius (default)</div></div>
+<div class="c"><div class="box" style="border-radius:999px;width:64px">pill</div><div class="lab">--radius-pill</div></div>
+<div class="c"><div class="box" style="border:0;box-shadow:var(--shadow-md)">md</div><div class="lab">--shadow-md</div></div>
+<div class="c"><div class="box" style="border:0;box-shadow:var(--shadow-lg)">lg</div><div class="lab">--shadow-lg</div></div>
+</body></html>

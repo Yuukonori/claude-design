@@ -1,0 +1,31 @@
+/* ============================================================
+   SPACING — Lattice  (4px base grid)
+   ============================================================ */
+:root {
+  --space-0: 0;
+  --space-px: 1px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --space-20: 80px;
+  --space-24: 96px;
+  --space-32: 128px;
+
+  /* Component-level rhythm */
+  --gutter: var(--space-6);
+  --section-gap: var(--space-16);
+  --control-pad-x: var(--space-3);
+  --control-pad-y: var(--space-2);
+
+  /* Layout */
+  --sidebar-w: 248px;
+  --topbar-h: 52px;
+  --max-content: 1200px;
+}

@@ -1,0 +1,31 @@
+/* ============================================================
+   EFFECTS — Lattice
+   Borders carry structure; shadows are deep + subtle (dark UI).
+   ============================================================ */
+:root {
+  /* Hairline borders */
+  --border-hairline: 1px solid var(--border-subtle);
+  --border-line: 1px solid var(--border-default);
+
+  /* Shadows — dark, low-spread, used on overlays only */
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.4);
+  --shadow-md: 0 8px 24px rgba(0,0,0,0.5);
+  --shadow-lg: 0 24px 64px rgba(0,0,0,0.6);
+  --shadow-overlay: 0 16px 48px rgba(0,0,0,0.7);
+
+  /* Focus ring */
+  --focus-ring: 0 0 0 1px var(--bg-app), 0 0 0 3px var(--ring);
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);   /* @kind other */
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1); /* @kind other */
+  --dur-fast: 120ms;  /* @kind other */
+  --dur-base: 180ms;  /* @kind other */
+  --dur-slow: 280ms;  /* @kind other */
+
+  /* Blur (overlays / glass topbars) */
+  --blur-overlay: saturate(120%) blur(12px); /* @kind other */
+
+  /* Grid texture overlay opacity (canvas backgrounds) */
+  --grid-line: rgba(255,255,255,0.035);
+}

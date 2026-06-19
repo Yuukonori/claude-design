@@ -1,0 +1,72 @@
+/* ============================================================
+   COLORS — Lattice
+   Monochrome-first, dark UI. Built on a single neutral ramp
+   (cool near-black → white). Semantic hues are intentionally
+   desaturated and used sparingly; the brand reads grayscale.
+   ============================================================ */
+:root {
+  /* --- Neutral ramp (the whole brand lives here) --- */
+  --neutral-0:   #050506;   /* deepest — app void / behind canvas */
+  --neutral-50:  #0a0a0c;   /* base background */
+  --neutral-100: #111114;   /* surface */
+  --neutral-150: #161619;   /* surface raised */
+  --neutral-200: #1c1c20;   /* card */
+  --neutral-300: #26262b;   /* hover fill / border subtle */
+  --neutral-400: #34343b;   /* border default */
+  --neutral-500: #46464f;   /* border strong / disabled fg */
+  --neutral-600: #6b6b76;   /* muted text */
+  --neutral-700: #8e8e99;   /* secondary text */
+  --neutral-800: #b8b8c0;   /* secondary-strong */
+  --neutral-900: #e7e7ea;   /* primary text */
+  --neutral-950: #fafafa;   /* high-contrast / pure surfaces */
+  --white:       #ffffff;
+
+  /* --- Semantic hues (muted, used sparingly) --- */
+  --green-base:  #5fb88a;   --green-dim:  #1c2c24;
+  --amber-base:  #d6a44a;   --amber-dim:  #2c2517;
+  --red-base:    #df6b63;   --red-dim:    #2e1c1c;
+  --blue-base:   #6c93d6;   --blue-dim:   #1a2333;
+
+  /* ============================================================
+     SEMANTIC ALIASES — reference these in components, not raw ramp
+     ============================================================ */
+  /* Backgrounds & surfaces */
+  --bg-app:        var(--neutral-50);
+  --bg-void:       var(--neutral-0);
+  --surface:       var(--neutral-100);
+  --surface-raised:var(--neutral-150);
+  --surface-card:  var(--neutral-200);
+  --surface-hover: var(--neutral-300);
+  --surface-inset: var(--neutral-0);
+
+  /* Text */
+  --text-primary:   var(--neutral-900);
+  --text-secondary: var(--neutral-700);
+  --text-muted:     var(--neutral-600);
+  --text-disabled:  var(--neutral-500);
+  --text-inverse:   var(--neutral-50);
+
+  /* Borders / hairlines */
+  --border-subtle:  var(--neutral-300);
+  --border-default: var(--neutral-400);
+  --border-strong:  var(--neutral-500);
+  --border-focus:   var(--neutral-950);
+
+  /* Action — monochrome: primary action is white-on-black */
+  --action-solid:        var(--neutral-950);
+  --action-solid-hover:  var(--white);
+  --action-solid-text:   var(--neutral-50);
+  --action-ghost-hover:  var(--neutral-300);
+
+  /* Status (foreground / background pairs) */
+  --status-success-fg: var(--green-base);  --status-success-bg: var(--green-dim);
+  --status-warning-fg: var(--amber-base);  --status-warning-bg: var(--amber-dim);
+  --status-danger-fg:  var(--red-base);    --status-danger-bg:  var(--red-dim);
+  --status-info-fg:    var(--blue-base);   --status-info-bg:    var(--blue-dim);
+
+  /* Selection / focus ring */
+  --ring: rgba(250,250,250,0.55);
+  --selection-bg: rgba(250,250,250,0.16);
+}
+
+::selection { background: var(--selection-bg); color: var(--text-primary); }

@@ -1,0 +1,52 @@
+/* ============================================================
+   TYPOGRAPHY — Lattice
+   Editorial pairing: Newsreader (serif display) + Space Grotesk
+   (grotesk UI/body) + JetBrains Mono (code/data).
+   ============================================================ */
+:root {
+  /* Families */
+  --font-serif-display: 'Newsreader', 'Times New Roman', serif;
+  --font-sans: 'Space Grotesk', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
+
+  /* Weights */
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* Type scale (display uses serif; rest use sans) */
+  --text-display-2xl: 72px;
+  --text-display-xl:  56px;
+  --text-display-lg:  44px;
+  --text-display-md:  34px;
+  --text-h1: 28px;
+  --text-h2: 22px;
+  --text-h3: 18px;
+  --text-body-lg: 16px;
+  --text-body: 14px;
+  --text-sm: 13px;
+  --text-xs: 11px;
+  --text-mono: 13px;
+
+  /* Line heights */
+  --leading-tight: 1.05;
+  --leading-snug: 1.2;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.65;
+
+  /* Letter spacing */
+  --tracking-tight: -0.02em;
+  --tracking-snug: -0.01em;
+  --tracking-normal: 0;
+  --tracking-wide: 0.04em;
+  --tracking-caps: 0.12em;  /* eyebrow / overline uppercase */
+}
+
+/* --- Specimen helpers (optional utility classes) --- */
+.t-display { font-family: var(--font-serif-display); font-weight: var(--weight-regular); line-height: var(--leading-tight); letter-spacing: var(--tracking-tight); color: var(--text-primary); }
+.t-display-italic { font-family: var(--font-serif-display); font-style: italic; }
+.t-h1 { font-family: var(--font-sans); font-size: var(--text-h1); font-weight: var(--weight-semibold); line-height: var(--leading-snug); letter-spacing: var(--tracking-snug); }
+.t-body { font-family: var(--font-sans); font-size: var(--text-body); font-weight: var(--weight-regular); line-height: var(--leading-normal); }
+.t-eyebrow { font-family: var(--font-sans); font-size: var(--text-xs); font-weight: var(--weight-semibold); text-transform: uppercase; letter-spacing: var(--tracking-caps); color: var(--text-muted); }
+.t-mono { font-family: var(--font-mono); font-size: var(--text-mono); font-weight: var(--weight-regular); letter-spacing: var(--tracking-normal); }

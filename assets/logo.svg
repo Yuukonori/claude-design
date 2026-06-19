@@ -1,0 +1,6 @@
+<svg width="148" height="32" viewBox="0 0 148 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect x="0.5" y="0.5" width="31" height="31" stroke="currentColor" stroke-opacity="0.5"></rect>
+  <path d="M11 0.5V31.5M21 0.5V31.5M0.5 11H31.5M0.5 21H31.5" stroke="currentColor" stroke-opacity="0.5"></path>
+  <rect x="11" y="11" width="10" height="10" fill="currentColor"></rect>
+  <text x="46" y="23" font-family="Newsreader, Times New Roman, serif" font-size="24" font-weight="500" letter-spacing="-0.01em" fill="currentColor">Lattice</text>
+</svg>

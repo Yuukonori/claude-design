@@ -1,0 +1,43 @@
+<!-- @dsCard group="Components" viewport="700x340" name="Core — buttons, badges, tags, avatars" subtitle="Action and identity primitives" -->
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+<script src="https://unpkg.com/lucide@latest"></script>
+<style>body{margin:0;background:var(--bg-app);padding:24px;font-family:var(--font-sans)}
+.grp{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:18px}
+.eb{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.12em;color:var(--text-muted);width:100%;margin-bottom:2px}
+[data-lucide]{width:15px;height:15px}</style></head>
+<body><div id="root"></div>
+<script type="text/babel">
+const { Button, IconButton, Badge, Tag, Avatar } = window.LatticeDesignSystem_e801cb;
+const Ic = ({n}) => <i data-lucide={n}></i>;
+function Demo(){return (<div>
+  <div className="grp"><span className="eb">Buttons</span>
+    <Button variant="solid" iconLeft={<Ic n="zap"/>}>Generate code</Button>
+    <Button variant="outline" iconLeft={<Ic n="plus"/>}>New frame</Button>
+    <Button variant="ghost">Cancel</Button>
+    <Button variant="danger">Delete</Button>
+    <Button variant="solid" disabled>Disabled</Button>
+  </div>
+  <div className="grp"><span className="eb">Sizes & icon buttons</span>
+    <Button size="sm">Small</Button><Button size="md">Medium</Button><Button size="lg">Large</Button>
+    <IconButton title="Zoom in"><Ic n="plus"/></IconButton>
+    <IconButton variant="outline" active title="Grid"><Ic n="grid-3x3"/></IconButton>
+    <IconButton title="More"><Ic n="more-horizontal"/></IconButton>
+  </div>
+  <div className="grp"><span className="eb">Badges & tags</span>
+    <Badge>Draft</Badge><Badge tone="success">Synced</Badge><Badge tone="warning">Pending</Badge>
+    <Badge tone="danger">Detached</Badge><Badge tone="info">Beta</Badge>
+    <Tag>layout</Tag><Tag onRemove={()=>{}}>responsive</Tag><Tag shape="pill">v2</Tag>
+  </div>
+  <div className="grp"><span className="eb">Avatars</span>
+    <Avatar name="Rin Sato" size="sm"/><Avatar name="Yuki Mori"/><Avatar name="A B" size="lg"/>
+  </div>
+</div>);}
+ReactDOM.createRoot(document.getElementById('root')).render(<Demo/>);
+setTimeout(()=>window.lucide&&window.lucide.createIcons(),100);
+</script>
+</body></html>
