@@ -26,7 +26,7 @@ function fillBg(node) {
 // Does a node carry any user-set appearance (used to decide whether to hide the canvas debug outline)?
 function hasAppearance(node) {
   if (!node) return false;
-  return !!(node.gradient || node.fillColor || node.borderWidth ||
+  return !!(node.gradient || node.fillColor || (node.shader && node.shader.on) || node.borderWidth ||
     (node.effects && node.effects.some(e => e && e.on !== false)) ||
     node.radius || (node.radii && node.radii.some(Boolean)) ||
     (node.opacity != null && node.opacity !== 100) ||

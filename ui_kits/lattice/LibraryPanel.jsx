@@ -1,6 +1,6 @@
 /* global React */
 // Left panel — categorized component library. Tiles are click-to-place and draggable onto the canvas.
-function LibraryPanel({ onPlace }) {
+function LibraryPanel({ onPlace, customComponents = [], onDeleteCustom, libraryComponents = [] }) {
   const { Input } = window.LatticeDesignSystem_e801cb;
   const [q, setQ] = React.useState('');
   const cats = [
@@ -43,6 +43,36 @@ function LibraryPanel({ onPlace }) {
     ] },
   ];
   const needle = q.trim().toLowerCase();
+  const customMatches = (customComponents || []).filter(c => c.name.toLowerCase().includes(needle));
+  const libMatches = (libraryComponents || []).filter(c => c.name.toLowerCase().includes(needle));
+
+  // Saved variant tile — places its captured props onto a fresh node of its base kind.
+  // `deletable` is false for read-only library assets (managed in the workspace Library page).
+  const customTile = (c, deletable = true) => {
+    const payload = { name: c.name, icon: c.icon || 'shapes', kind: c.base, props: c.props || {}, custom: true };
+    return (
+      <div key={c.id} style={{ position: 'relative' }}>
+        <button type="button" draggable
+          onDragStart={e => { e.dataTransfer.setData('application/lattice-component', JSON.stringify(payload)); e.dataTransfer.effectAllowed = 'copy'; }}
+          onClick={() => onPlace(payload)}
+          title={'Drag to canvas or click to place ' + c.name}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 8, padding: '8px 9px', width: '100%',
+            background: 'var(--surface-card)', border: '1px solid var(--border-subtle)',
+            color: 'var(--text-secondary)', cursor: 'grab', fontSize: 12, fontFamily: 'var(--font-sans)',
+          }}
+          onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--border-strong)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
+          onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border-subtle)'; e.currentTarget.style.color = 'var(--text-secondary)'; }}>
+          <i data-lucide={c.icon || 'shapes'} style={{ width: 14, height: 14 }}></i>
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</span>
+        </button>
+        {deletable && onDeleteCustom && (
+          <button type="button" title="Delete component" onClick={() => onDeleteCustom(c.id)}
+            style={{ position: 'absolute', top: -6, right: -6, width: 15, height: 15, borderRadius: '50%', border: 0, background: 'var(--surface-raised)', color: 'var(--text-muted)', cursor: 'pointer', fontSize: 11, lineHeight: '13px', padding: 0 }}>×</button>
+        )}
+      </div>
+    );
+  };
 
   const tile = (c) => (
     <button key={c.name} type="button" draggable
@@ -66,6 +96,18 @@ function LibraryPanel({ onPlace }) {
       <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--text-muted)', marginBottom: 10 }}>Library</div>
       <Input iconLeft={<i data-lucide="search"></i>} placeholder="Search components" size="sm" value={q} onChange={(e) => setQ(e.target.value)} />
       <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {libMatches.length > 0 && (
+          <div>
+            {!needle && <div style={{ fontSize: 9, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--text-disabled)', marginBottom: 6 }}>From library</div>}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>{libMatches.map(c => customTile(c, false))}</div>
+          </div>
+        )}
+        {customMatches.length > 0 && (
+          <div>
+            {!needle && <div style={{ fontSize: 9, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--text-disabled)', marginBottom: 6 }}>Custom</div>}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>{customMatches.map(c => customTile(c))}</div>
+          </div>
+        )}
         {cats.map(cat => {
           const items = cat.items.filter(c => c.name.toLowerCase().includes(needle));
           if (!items.length) return null;

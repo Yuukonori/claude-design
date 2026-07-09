@@ -12,6 +12,7 @@ app.use(cookieParser());
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/projects', require('./routes/projects'));
+app.use('/api/library', require('./routes/library'));
 app.use('/api', require('./routes/billing')); // /api/plans, /api/subscription, /api/invoices
 app.use('/api/team', require('./routes/team'));
 app.use('/api/account', require('./routes/account'));

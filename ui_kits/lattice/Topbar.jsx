@@ -1,5 +1,20 @@
 /* global React */
 // Top bar — logo, breadcrumb, view tabs, collaborators, generate action.
+
+// Track a CSS media query so the toolbar can shed low-priority chrome on small screens.
+function useMediaQuery(query) {
+  const read = () => (typeof window !== 'undefined' && window.matchMedia ? window.matchMedia(query).matches : false);
+  const [matches, setMatches] = React.useState(read);
+  React.useEffect(() => {
+    const m = window.matchMedia(query);
+    const on = () => setMatches(m.matches);
+    on();
+    m.addEventListener ? m.addEventListener('change', on) : m.addListener(on);
+    return () => { m.removeEventListener ? m.removeEventListener('change', on) : m.removeListener(on); };
+  }, [query]);
+  return matches;
+}
+
 const DEVICES = [
   ['desktop', 'monitor', 'Desktop'],
   ['tablet', 'tablet', 'Tablet'],
@@ -26,50 +41,58 @@ const pageCloseStyle = (show) => ({
 });
 const pageAddStyle = { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 33, flex: 'none', border: 0, borderRight: '1px solid var(--border-subtle)', background: 'transparent', color: 'var(--text-muted)', cursor: 'pointer' };
 
-function Topbar({ view, setView, pageName, projectName, saving, onBack, onHelp, previewMode, onTogglePreview, onRun, device, onSetDevice, artboard, orientation, onToggleOrientation, customSize, onSetCustomSize, onOpenSettings, onShare, onGenerate, dirty, onUndo, onRedo, canUndo, canRedo }) {
+function Topbar({ view, setView, pageName, projectName, saving, onBack, onHelp, previewMode, onTogglePreview, onRun, device, onSetDevice, responsive = true, desktopPreset, onSetDesktopPreset, artboard, orientation, onToggleOrientation, customSize, onSetCustomSize, onOpenSettings, onShare, onGenerate, dirty, onUndo, onRedo, canUndo, canRedo }) {
+  const DESKTOP_PRESETS = window.DESKTOP_PRESETS || [];
   const { IconButton, Tabs, Button, Tooltip } = window.LatticeDesignSystem_e801cb;
+  // Progressive breakpoints — shed breadcrumb/readout chrome so the view tabs never collide.
+  const compact = useMediaQuery('(max-width: 1280px)');
+  const tight = useMediaQuery('(max-width: 1050px)');
   return (
     <header style={{
       height: 'var(--topbar-h)', flex: 'none', display: 'flex', alignItems: 'center',
       gap: 14, padding: '0 12px', borderBottom: '1px solid var(--border-subtle)',
       background: 'var(--surface)',
     }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-        <span style={{ display: 'inline-flex', color: 'var(--text-primary)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: '0 1 auto' }}>
+        <span style={{ display: 'inline-flex', color: 'var(--text-primary)', flex: 'none' }}>
           <img src="../../assets/logo-mark.svg" alt="Lattice" style={{ height: 22, display: 'block' }} />
         </span>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 13, color: 'var(--text-muted)', minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 13, color: 'var(--text-muted)', minWidth: 0, overflow: 'hidden' }}>
           {onBack ? (
             <>
-              <button type="button" onClick={onBack} title="Back to projects" style={{ display: 'inline-flex', alignItems: 'center', border: 0, background: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer', padding: 2, marginRight: 2 }}>
+              <button type="button" onClick={onBack} title="Back to projects" style={{ display: 'inline-flex', alignItems: 'center', border: 0, background: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer', padding: 2, marginRight: 2, flex: 'none' }}>
                 <i data-lucide="arrow-left" style={{ width: 15, height: 15 }}></i>
               </button>
-              <span onClick={onBack} style={{ cursor: 'pointer' }}>Projects</span>
-              <span style={{ color: 'var(--border-strong)' }}>/</span>
-              <span style={{ color: 'var(--text-primary)', fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 200 }}>{projectName || 'Untitled project'}</span>
-              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: saving ? 'var(--amber-base)' : 'var(--text-disabled)' }}>{saving ? 'saving…' : 'saved'}</span>
+              {!compact && <span onClick={onBack} style={{ cursor: 'pointer', flex: 'none' }}>Projects</span>}
+              {!compact && <span style={{ color: 'var(--border-strong)', flex: 'none' }}>/</span>}
+              {!tight && <span style={{ color: 'var(--text-primary)', fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 200, minWidth: 0 }}>{projectName || 'Untitled project'}</span>}
+              {!compact ? (
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: saving ? 'var(--amber-base)' : 'var(--text-disabled)', flex: 'none' }}>{saving ? 'saving…' : 'saved'}</span>
+              ) : saving && (
+                <span title="Saving…" style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--amber-base)', flex: 'none' }} />
+              )}
             </>
           ) : (
             <>
-              <span>Marketing site</span>
-              <span style={{ color: 'var(--border-strong)' }}>/</span>
-              <span style={{ color: 'var(--text-primary)', fontWeight: 500, whiteSpace: 'nowrap' }}>{pageName}</span>
-              {dirty && <span title="Unsaved changes" style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--amber-base)' }} />}
+              {!compact && <span style={{ flex: 'none' }}>Marketing site</span>}
+              {!compact && <span style={{ color: 'var(--border-strong)', flex: 'none' }}>/</span>}
+              <span style={{ color: 'var(--text-primary)', fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 }}>{pageName}</span>
+              {dirty && <span title="Unsaved changes" style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--amber-base)', flex: 'none' }} />}
             </>
           )}
         </div>
       </div>
 
-      <div style={{ marginLeft: 12 }}>
+      <div style={{ marginLeft: compact ? 6 : 12, flex: 'none' }}>
         <Tabs value={view} onChange={setView} tabs={[
           { value: 'design', label: 'Design' },
           { value: 'code', label: 'Code' },
-          { value: 'rel', label: 'Relationships' },
-          { value: 'workflow', label: 'Workflow' },
-        ]} style={{ borderBottom: 0 }} />
+          { value: 'rel', label: tight ? 'Rel.' : 'Relationships' },
+          { value: 'workflow', label: tight ? 'Flow' : 'Workflow' },
+        ]} style={{ borderBottom: 0, flexWrap: 'nowrap' }} />
       </div>
 
-      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 12 }}>
+      <div style={{ marginLeft: 'auto', flex: 'none', display: 'flex', alignItems: 'center', gap: compact ? 8 : 12 }}>
         <div style={{ display: 'flex', gap: 2 }}>
           <Tooltip label="Undo (Ctrl+Z)">
             <IconButton title="Undo" disabled={!canUndo} onClick={onUndo}>
@@ -83,7 +106,7 @@ function Topbar({ view, setView, pageName, projectName, saving, onBack, onHelp, 
           </Tooltip>
         </div>
 
-        {view === 'design' && onSetDevice && (
+        {view === 'design' && onSetDevice && responsive && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <div style={{ display: 'flex', border: '1px solid var(--border-default)', borderRadius: 4, overflow: 'hidden' }}>
               {DEVICES.map(([id, icon, label]) => (
@@ -97,6 +120,12 @@ function Topbar({ view, setView, pageName, projectName, saving, onBack, onHelp, 
             <Tooltip label="Rotate">
               <IconButton title="Rotate" size="sm" onClick={onToggleOrientation}><i data-lucide="rotate-cw"></i></IconButton>
             </Tooltip>
+            {device === 'desktop' && onSetDesktopPreset && !compact && (
+              <select title="Screen type" value={desktopPreset || 'std'} onChange={e => onSetDesktopPreset(e.target.value)}
+                style={{ height: 24, maxWidth: 168, border: '1px solid var(--border-default)', background: 'var(--surface-inset)', color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', fontSize: 11, outline: 'none', cursor: 'pointer', padding: '0 4px' }}>
+                {DESKTOP_PRESETS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+              </select>
+            )}
             {device === 'custom' ? (
               <div style={{ display: 'flex', alignItems: 'center', gap: 3, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)' }}>
                 <input type="number" title="Screen width" min={200} value={(customSize && customSize.w) || 1200}
@@ -105,21 +134,23 @@ function Topbar({ view, setView, pageName, projectName, saving, onBack, onHelp, 
                 <input type="number" title="Screen height" min={200} value={(customSize && customSize.h) || 800}
                   onChange={e => onSetCustomSize((customSize && customSize.w) || 1200, e.target.value)} style={dimIn} />
               </div>
-            ) : (
+            ) : !compact && (
               <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{artboard ? `${artboard.w}×${artboard.h}` : ''}</span>
             )}
           </div>
         )}
 
         {view === 'design' && (
-          <Button variant={previewMode ? 'solid' : 'outline'} size="sm" onClick={onTogglePreview}
-            iconLeft={<i key={previewMode ? 'e' : 'p'} data-lucide={previewMode ? 'pencil' : 'play'}></i>}>
-            {previewMode ? 'Edit' : 'Preview'}
-          </Button>
+          <Tooltip label={previewMode ? 'Edit' : 'Preview'}>
+            <Button variant={previewMode ? 'solid' : 'outline'} size="sm" onClick={onTogglePreview}
+              iconLeft={<i key={previewMode ? 'e' : 'p'} data-lucide={previewMode ? 'pencil' : 'play'}></i>}>
+              {tight ? '' : (previewMode ? 'Edit' : 'Preview')}
+            </Button>
+          </Tooltip>
         )}
         {onRun && (
           <Tooltip label="Run the app live in a new tab">
-            <Button variant="outline" size="sm" onClick={onRun} iconLeft={<i data-lucide="rocket"></i>}>Run</Button>
+            <Button variant="outline" size="sm" onClick={onRun} iconLeft={<i data-lucide="rocket"></i>}>{tight ? '' : 'Run'}</Button>
           </Tooltip>
         )}
         <Tooltip label="Keyboard shortcuts (?)">
@@ -128,8 +159,20 @@ function Topbar({ view, setView, pageName, projectName, saving, onBack, onHelp, 
         <Tooltip label="Settings">
           <IconButton title="Settings" onClick={onOpenSettings}><i data-lucide="settings"></i></IconButton>
         </Tooltip>
-        <Button variant="outline" size="sm" onClick={onShare} iconLeft={<i data-lucide="share-2"></i>}>Share</Button>
-        <Button variant="solid"   size="sm" onClick={onGenerate} iconLeft={<i data-lucide="zap"></i>}>Generate code</Button>
+        {tight ? (
+          <Tooltip label="Share">
+            <IconButton title="Share" onClick={onShare}><i data-lucide="share-2"></i></IconButton>
+          </Tooltip>
+        ) : (
+          <Button variant="outline" size="sm" onClick={onShare} iconLeft={<i data-lucide="share-2"></i>}>Share</Button>
+        )}
+        {tight ? (
+          <Tooltip label="Generate code">
+            <Button variant="solid" size="sm" onClick={onGenerate} iconLeft={<i data-lucide="zap"></i>} aria-label="Generate code" />
+          </Tooltip>
+        ) : (
+          <Button variant="solid" size="sm" onClick={onGenerate} iconLeft={<i data-lucide="zap"></i>}>{compact ? 'Generate' : 'Generate code'}</Button>
+        )}
       </div>
     </header>
   );

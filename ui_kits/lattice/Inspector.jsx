@@ -14,7 +14,8 @@ const SHAPE = new Set(['rect', 'ellipse', 'line', 'triangle', 'star', 'polygon',
 const BORDER_INTRINSIC = new Set(['input']);
 window.kindOf = kindOf;
 
-function Inspector({ node, onChange, onBaseChange, onRename, connections, onDelete, onDetach, onDuplicate, allNodes = [], onSetParent, palette = [], pages = [], workflows = [], variables = [], pageVars = [], editingState = 'default', onSetEditingState, singleSelected = true, onResetState, editingFrame = null, onSetEditingFrame, onAddCustomState, onUpdateCustomState, onDeleteCustomState, onAddFrame, onUpdateFrame, onDeleteFrame, frameEditing = false, onOpenAnimEditor, width }) {
+function Inspector({ node, onChange, onBaseChange, onRename, connections, onDelete, onDetach, onDuplicate, allNodes = [], onSetParent, responsive = true, palette = [], pages = [], workflows = [], variables = [], pageVars = [], editingState = 'default', onSetEditingState, singleSelected = true, onResetState, editingFrame = null, onSetEditingFrame, onAddCustomState, onUpdateCustomState, onDeleteCustomState, onAddFrame, onUpdateFrame, onDeleteFrame, frameEditing = false, onOpenAnimEditor, onSaveAsComponent, onEditShader, shaderPresets, width }) {
+  const SHADERS = shaderPresets || window.SHADER_PRESETS || { plasma: '' };
   const { Select, Switch, Tag, Badge, Button, Input } = window.LatticeDesignSystem_e801cb;
 
   if (!node) {
@@ -444,13 +445,36 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
 
         {EffectsSection && <EffectsSection node={node} onChange={onChange} palette={palette} />}
 
+        <Section title="Shader">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <Switch label="Shader fill" checked={!!(node.shader && node.shader.on)}
+              onChange={on => onChange(node.id, { shader: {
+                ...(node.shader || {}),
+                on,
+                code: (node.shader && node.shader.code) || SHADERS.plasma || '',
+                preset: (node.shader && node.shader.preset) || 'plasma',
+                speed: (node.shader && node.shader.speed) ?? 1,
+              } })} />
+            {node.shader && node.shader.on && (
+              <>
+                <Select label="Preset" size="sm" options={Object.keys(SHADERS)}
+                  value={node.shader.preset || 'plasma'}
+                  onChange={e => onChange(node.id, { shader: { ...node.shader, preset: e.target.value, code: SHADERS[e.target.value] || node.shader.code } })} />
+                <NumRow label="Speed" value={node.shader.speed ?? 1} min={0} step={0.1} onChange={v => onChange(node.id, { shader: { ...node.shader, speed: Math.max(0, +v || 0) } })} />
+                <Button variant="outline" size="sm" fullWidth iconLeft={<i data-lucide="code"></i>}
+                  onClick={() => onEditShader && onEditShader(node.id)}>Edit code</Button>
+              </>
+            )}
+          </div>
+        </Section>
+
         {/* Node-level sections (not per-state) — only shown while editing the Default state. */}
         {editingState === 'default' && AnimationSection && <AnimationSection node={node} onChange={onChange} />}
         {editingState === 'default' && ActionsEditor && <ActionsEditor node={node} onChange={onChange} pages={pages} allNodes={otherNodes} workflows={workflows} />}
 
         {editingState === 'default' && <Section title="Behavior">
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <Switch label="Responsive"    checked={!!node.responsive}  onChange={v => onChange(node.id, { responsive: v })} />
+            {responsive && <Switch label="Responsive (per-screen)" checked={node.responsive !== false} onChange={v => onChange(node.id, { responsive: v })} />}
             <Switch label="Clip content"  checked={!!node.clipContent} onChange={v => onChange(node.id, { clipContent: v })} />
             <Switch label="Lock position" checked={!!node.locked}      onChange={v => onChange(node.id, { locked: v })} />
             <Switch label="Hidden"        checked={!!node.hidden}      onChange={v => onChange(node.id, { hidden: v })} />
@@ -482,9 +506,14 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
       </div>
 
       {!frameEditing && (
-        <div style={{ padding: 12, borderTop: '1px solid var(--border-subtle)', display: 'flex', gap: 8 }}>
-          <Button variant="outline" size="sm" fullWidth onClick={onDuplicate} iconLeft={<i data-lucide="copy"></i>}>Duplicate</Button>
-          <Button variant="danger"  size="sm" fullWidth onClick={() => onDelete(node.id)} iconLeft={<i data-lucide="trash-2"></i>}>Delete</Button>
+        <div style={{ padding: 12, borderTop: '1px solid var(--border-subtle)', display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {onSaveAsComponent && (
+            <Button variant="outline" size="sm" fullWidth onClick={() => onSaveAsComponent(node.id)} iconLeft={<i data-lucide="package-plus"></i>}>Save as component</Button>
+          )}
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Button variant="outline" size="sm" fullWidth onClick={onDuplicate} iconLeft={<i data-lucide="copy"></i>}>Duplicate</Button>
+            <Button variant="danger"  size="sm" fullWidth onClick={() => onDelete(node.id)} iconLeft={<i data-lucide="trash-2"></i>}>Delete</Button>
+          </div>
         </div>
       )}
     </aside>

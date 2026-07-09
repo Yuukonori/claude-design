@@ -317,11 +317,16 @@ function AvatarMenu({ user }) {
 
 function AppShell({ active, user, title, actions, children }) {
   const { Button } = window.LatticeDesignSystem_e801cb;
-  const nav = [
+  const workspaceNav = [
     ['/projects', 'layout-grid', 'Projects'],
     ['/team', 'users', 'Team'],
     ['/billing', 'credit-card', 'Billing'],
     ['/account', 'user', 'Account'],
+  ];
+  const marketNav = [
+    ['/market', 'store', 'Market'],
+    ['/plugins', 'blocks', 'Plugins'],
+    ['/library', 'library', 'Library'],
   ];
   return (
     <div style={{ minHeight: '100vh', display: 'flex', background: 'var(--bg-app)' }}>
@@ -329,7 +334,9 @@ function AppShell({ active, user, title, actions, children }) {
         <div style={{ padding: '16px 16px', borderBottom: '1px solid var(--border-subtle)' }}><Wordmark size={18} /></div>
         <nav style={{ padding: 10, display: 'flex', flexDirection: 'column', gap: 2, flex: 1 }}>
           <Eyebrow style={{ padding: '8px 10px 4px' }}>Workspace</Eyebrow>
-          {nav.map(([to, icon, label]) => <SidebarLink key={to} to={to} icon={icon} label={label} active={active === to} />)}
+          {workspaceNav.map(([to, icon, label]) => <SidebarLink key={to} to={to} icon={icon} label={label} active={active === to} />)}
+          <Eyebrow style={{ padding: '14px 10px 4px' }}>Marketplace</Eyebrow>
+          {marketNav.map(([to, icon, label]) => <SidebarLink key={to} to={to} icon={icon} label={label} active={active === to} />)}
           <div style={{ marginTop: 'auto', padding: '6px 6px 2px' }}>
             <Button variant="outline" size="sm" fullWidth iconLeft={<Ic n="life-buoy" s={15} />}
               onClick={() => { window.location.href = 'mailto:support@lattice.design?subject=Support%20request'; }}>

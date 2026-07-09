@@ -520,7 +520,7 @@ function Canvas({ nodes, connections, settings = {}, artboard, device, selectedI
             >
               {/* Real component render — non-interactive so drag stays on the wrapper */}
               <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', overflow: n.clipContent ? 'hidden' : 'visible' }}>
-                {isContainer
+                {isContainer && !(n.shader && n.shader.on)
                   ? ((window.fillBg(n) || window.nodeFx(n))
                       ? <div style={{ width: '100%', height: '100%', background: window.fillBg(n) || 'transparent', ...window.nodeFx(n) }} />
                       : null)

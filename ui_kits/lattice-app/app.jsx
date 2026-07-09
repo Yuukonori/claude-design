@@ -1,7 +1,7 @@
-/* global React, AuthProvider, useAuth, useHashRoute, Toaster, Navbar, Footer, FullLoader, navigate, Home, Login, Register, Subscription, Projects, Account, Billing, Team */
+/* global React, AuthProvider, useAuth, useHashRoute, Toaster, Navbar, Footer, FullLoader, navigate, Home, Login, Register, Subscription, Projects, Account, Billing, Team, Market, Plugins, Library */
 
 const AUTH_PAGES = ['/login', '/register'];
-const APP_ROUTES = ['/projects', '/account', '/billing', '/team'];
+const APP_ROUTES = ['/projects', '/account', '/billing', '/team', '/market', '/plugins', '/library'];
 
 function NotFound() {
   const { Button } = window.LatticeDesignSystem_e801cb;
@@ -24,6 +24,9 @@ function renderPage(path) {
     case '/account': return <Account />;
     case '/billing': return <Billing />;
     case '/team': return <Team />;
+    case '/market': return <Market />;
+    case '/plugins': return <Plugins />;
+    case '/library': return <Library />;
     default: return <NotFound />;
   }
 }

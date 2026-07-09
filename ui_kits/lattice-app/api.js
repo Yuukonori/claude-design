@@ -33,6 +33,12 @@ window.api = (function () {
     createProject: (b) => req('POST', '/api/projects', b),
     updateProject: (id, b) => req('PUT', '/api/projects/' + id, b),
     deleteProject: (id) => req('DELETE', '/api/projects/' + id),
+    // marketplace: static catalog + per-account library
+    market: () => fetch('default_market.json', { credentials: 'same-origin' }).then(r => r.json()),
+    library: () => req('GET', '/api/library'),
+    installItem: (b) => req('POST', '/api/library', b),
+    updateItem: (id, b) => req('PUT', '/api/library/' + id, b),
+    deleteItem: (id) => req('DELETE', '/api/library/' + id),
     // team
     team: () => req('GET', '/api/team'),
     invite: (b) => req('POST', '/api/team', b),

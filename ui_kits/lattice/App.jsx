@@ -15,6 +15,7 @@ const DEFAULT_CONNECTIONS = [
 
 const DEFAULT_SETTINGS = {
   snap: true, gridSize: 8, showGrid: true,
+  responsive: true, desktopPreset: 'std',
   customSize: { w: 1200, h: 800 },
   palette: [
     { name: 'White', value: '#ffffff' }, { name: 'Ink', value: '#0a0a0c' },
@@ -68,8 +69,23 @@ function coerceVar(v) {
 const DEVICE = { desktop: { w: 1440, h: 1024 }, tablet: { w: 820, h: 1180 }, mobile: { w: 390, h: 844 } };
 const GEOM_KEYS = ['x', 'y', 'w', 'h', 'hidden'];
 
+// Desktop screen-type presets (aspect / resolution). The chosen id lives in settings.desktopPreset.
+// Label = screen type only; the topbar readout shows the actual px size (so no duplication and it
+// stays correct after Rotate, which swaps w/h).
+const DESKTOP_PRESETS = [
+  { id: 'std',  label: 'Standard (5:4)', w: 1440, h: 1024 },
+  { id: 'fhd',  label: '16:9 · FHD',     w: 1920, h: 1080 },
+  { id: 'wxga', label: '16:10',          w: 1680, h: 1050 },
+  { id: 'uxga', label: '4:3',            w: 1440, h: 1080 },
+  { id: 'uw',   label: '21:9 · Ultrawide', w: 2560, h: 1080 },
+  { id: 'sq',   label: '1:1 · Square',   w: 1080, h: 1080 },
+];
+const desktopSize = (id) => DESKTOP_PRESETS.find(p => p.id === id) || DESKTOP_PRESETS[0];
+window.DESKTOP_PRESETS = DESKTOP_PRESETS;
+
+// Per-device geometry: overrides only apply when the node opts into responsive (default on).
 function geomAt(n, dev) {
-  if (dev && dev !== 'desktop' && n.bp && n.bp[dev]) {
+  if (dev && dev !== 'desktop' && n.responsive !== false && n.bp && n.bp[dev]) {
     const o = n.bp[dev];
     return { x: o.x, y: o.y, w: o.w, h: o.h, hidden: !!o.hidden };
   }
@@ -110,8 +126,23 @@ function withWorkflowDefaults(project) {
     ...project,
     workflows: project.workflows || [],
     variables: project.variables || [],
+    customComponents: project.customComponents || [],
+    enabledLibrary: project.enabledLibrary || [],
     pages: (project.pages || []).map(p => ({ ...p, vars: p.vars || [] })),
   };
+}
+
+// Props captured when saving a configured node as a reusable custom component (its "variant").
+const VARIANT_PROP_KEYS = ['label', 'variant', 'btnSize', 'tone', 'fillColor', 'gradient', 'shader',
+  'textColor', 'fontSize', 'fontWeight', 'fontFamily', 'letterSpacing', 'textAlign', 'textTransform',
+  'radius', 'radii', 'borderWidth', 'borderStyle', 'borderColor', 'effects', 'opacity',
+  'layout', 'gap', 'padding', 'columns', 'align', 'justify', 'w', 'h',
+  'iconName', 'iconSize', 'placeholder', 'inputType', 'optionsText', 'checked', 'src',
+  'chartType', 'chartColor', 'value'];
+function captureVariantProps(node) {
+  const o = {};
+  for (const k of VARIANT_PROP_KEYS) if (node[k] !== undefined && node[k] !== '') o[k] = node[k];
+  return o;
 }
 
 function loadState() {
@@ -149,6 +180,21 @@ function LatticeApp() {
   // --- Workflow tab: named automation graphs + project-wide variables ---
   const [workflows, setWorkflows] = React.useState(boot.project.workflows || []);
   const [variables, setVariables] = React.useState(boot.project.variables || []); // global vars
+  const [customComponents, setCustomComponents] = React.useState(boot.project.customComponents || []); // saved variants
+  const [libraryItems, setLibraryItems] = React.useState([]);                                          // this account's installed assets/plugins
+  const [enabledLibrary, setEnabledLibrary] = React.useState(boot.project.enabledLibrary || []);       // library item ids enabled for THIS project
+  const toggleLibraryItem = (id) => setEnabledLibrary(list => list.includes(id) ? list.filter(x => x !== id) : [...list, id]);
+  // Items enabled for this project, resolved into the editor's existing systems.
+  const enabledItems = React.useMemo(() => libraryItems.filter(i => enabledLibrary.includes(i.id)), [libraryItems, enabledLibrary]);
+  const shaderPresets = React.useMemo(() => {
+    const out = { ...(window.SHADER_PRESETS || {}) };
+    enabledItems.filter(i => i.type === 'shader' && i.data && i.data.code).forEach(i => { out[i.name] = i.data.code; });
+    return out;
+  }, [enabledItems]);
+  const libraryComponents = React.useMemo(() =>
+    enabledItems.filter(i => i.type === 'component' && i.data && i.data.base)
+      .map(i => ({ id: 'lib_' + i.id, name: i.name, icon: 'component', base: i.data.base, props: i.data.props || {} })),
+    [enabledItems]);
   const [activeWorkflowId, setActiveWorkflowId] = React.useState((boot.project.workflows || [])[0]?.id || null);
   // Runtime state, live only in Preview: variable values (by var id) and workflow-driven prop overrides.
   const [runtimeVars, setRuntimeVars] = React.useState({}); // varId -> value
@@ -171,6 +217,14 @@ function LatticeApp() {
     try { return { left: 280, right: 280, ...JSON.parse(localStorage.getItem('lattice_panels') || '{}') }; } catch { return { left: 280, right: 280 }; }
   });
   React.useEffect(() => { try { localStorage.setItem('lattice_panels', JSON.stringify(panelW)); } catch {} }, [panelW]);
+  // Resizable left-section heights. `null` = fit content (no reserved empty space); a number = an
+  // explicit height the user dragged to. Layers always flexes to fill whatever remains.
+  const [panelH, setPanelH] = React.useState(() => {
+    try { return { pages: null, library: 300, ...JSON.parse(localStorage.getItem('lattice_left_sizes') || '{}') }; } catch { return { pages: null, library: 300 }; }
+  });
+  React.useEffect(() => { try { localStorage.setItem('lattice_left_sizes', JSON.stringify(panelH)); } catch {} }, [panelH]);
+  const pagesSecRef = React.useRef(null);     // left-panel section wrappers, measured on resize-drag start
+  const librarySecRef = React.useRef(null);
   const [shareOpen, setShareOpen] = React.useState(false);
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   const [previewDialog, setPreviewDialog] = React.useState(null);
@@ -227,12 +281,15 @@ function LatticeApp() {
   // Artboard size = custom size as-is, or a preset oriented portrait/landscape.
   const artboard = React.useMemo(() => {
     if (activeDevice === 'custom') return (settings.customSize && settings.customSize.w) ? settings.customSize : { w: 1200, h: 800 };
-    const b = DEVICE[activeDevice] || DEVICE.desktop;
+    const b = activeDevice === 'desktop' ? desktopSize(settings.desktopPreset) : (DEVICE[activeDevice] || DEVICE.desktop);
     const lo = Math.max(b.w, b.h), sh = Math.min(b.w, b.h);
     return (orient[activeDevice] || 'landscape') === 'portrait' ? { w: sh, h: lo } : { w: lo, h: sh };
-  }, [activeDevice, orient, settings.customSize]);
+  }, [activeDevice, orient, settings.customSize, settings.desktopPreset]);
 
   const setCustomSize = (w, h) => setSettings(s => ({ ...s, customSize: { w: Math.max(200, Math.round(+w) || 1200), h: Math.max(200, Math.round(+h) || 800) } }));
+  const setDesktopPreset = (id) => setSettings(s => ({ ...s, desktopPreset: id }));
+  // When responsive mode is off the project is desktop-only — keep the active device on desktop.
+  React.useEffect(() => { if (!settings.responsive && activeDevice !== 'desktop') setActiveDevice('desktop'); }, [settings.responsive, activeDevice]);
   const toggleOrientation = () => {
     if (activeDeviceRef.current === 'custom') {
       setSettings(s => { const c = s.customSize || { w: 1200, h: 800 }; return { ...s, customSize: { w: c.h, h: c.w } }; });
@@ -301,6 +358,8 @@ function LatticeApp() {
           setActivePageId('page_1');
         }
         setWorkflows(c.workflows || []); setVariables(c.variables || []);
+        setCustomComponents(c.customComponents || []);
+        setEnabledLibrary(c.enabledLibrary || []);
         setActiveWorkflowId((c.workflows || [])[0]?.id || null);
         setSelectedIds([]);
         setProjectName(d.project.name || '');
@@ -310,6 +369,14 @@ function LatticeApp() {
       .finally(() => { projectLoadedRef.current = true; });
   }, [projectId]);
 
+  // Load this account's installed library (assets/plugins). Shared across projects; enabled per project.
+  React.useEffect(() => {
+    fetch('/api/library', { credentials: 'include' })
+      .then(r => (r.ok ? r.json() : { items: [] }))
+      .then(d => setLibraryItems(d.items || []))
+      .catch(() => {});
+  }, []);
+
   // Debounced save of the canvas to the API
   React.useEffect(() => {
     if (!projectId || !projectLoadedRef.current) return;
@@ -317,11 +384,11 @@ function LatticeApp() {
     const t = setTimeout(() => {
       fetch('/api/projects/' + projectId, {
         method: 'PUT', credentials: 'include', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ canvas: { pages, activePageId, workflows, variables } }),
+        body: JSON.stringify({ canvas: { pages, activePageId, workflows, variables, customComponents, enabledLibrary } }),
       }).catch(() => {}).finally(() => setSaving(false));
     }, 800);
     return () => clearTimeout(t);
-  }, [projectId, pages, activePageId, workflows, variables]);
+  }, [projectId, pages, activePageId, workflows, variables, customComponents, enabledLibrary]);
 
   const fireToast = (t) => {
     setToast(t);
@@ -462,10 +529,11 @@ function LatticeApp() {
   }, [applySnapshot]);
 
   // Device-aware geometry write: desktop → base props; tablet/mobile → node.bp[device] override.
+  // A non-responsive node ignores the device and always writes its shared base (identical everywhere).
   const writeGeom = React.useCallback((id, patch) => {
-    const dev = activeDeviceRef.current;
     setNodes(ns => ns.map(n => {
       if (n.id !== id) return n;
+      const dev = n.responsive === false ? 'desktop' : activeDeviceRef.current;
       if (dev === 'desktop') return { ...n, ...patch };
       const cur = (n.bp && n.bp[dev]) || { x: n.x, y: n.y, w: n.w, h: n.h, hidden: !!n.hidden };
       return { ...n, bp: { ...n.bp, [dev]: { ...cur, ...patch } } };
@@ -916,11 +984,13 @@ function LatticeApp() {
     const d = KIND_DEFAULTS[kind] || {};
     const w = d.w || 200, h = d.h || 120;
     const s = spot || findOpenSpot(nodesRef.current, w, h);
+    const props = c.props || {}; // custom-component captured variant props (override kind defaults)
     const n = {
-      id, name: c.name, icon: c.icon, kind, x: s.x, y: s.y,
-      w, h, layout: 'Flex column', gap: 12,
+      name: c.name, icon: c.icon, layout: 'Flex column', gap: 12,
       synced: false, responsive: true, clipContent: false, locked: false, hidden: false, fillColor: '',
       ...d,
+      ...props,
+      id, kind, x: s.x, y: s.y, w: props.w || w, h: props.h || h, // identity/placement always win
     };
     if (n.label === undefined) n.label = c.name;
     pushHistory();
@@ -933,6 +1003,88 @@ function LatticeApp() {
   const dropComponent = React.useCallback((c, cx, cy) => {
     placeNode(c, { x: Math.round(cx - 100), y: Math.round(cy - 60) });
   }, []); // eslint-disable-line
+
+  // --- Custom components: capture a configured node's variant into a reusable Library item ---
+  const [saveCompFor, setSaveCompFor] = React.useState(null);  // node id awaiting a name
+  const [saveCompName, setSaveCompName] = React.useState('');
+  const openSaveAsComponent = (id) => {
+    const n = nodesRef.current.find(x => x.id === id);
+    if (!n) return;
+    setSaveCompFor(id);
+    setSaveCompName((n.name || 'Component') + ' variant');
+  };
+  const confirmSaveAsComponent = () => {
+    const n = nodesRef.current.find(x => x.id === saveCompFor);
+    const name = saveCompName.trim();
+    if (!n || !name) { setSaveCompFor(null); return; }
+    const base = n.kind || (window.kindOf ? window.kindOf(n) : 'frame');
+    const cc = { id: uid('cc'), name, icon: n.icon || 'shapes', base, props: captureVariantProps(n) };
+    setCustomComponents(list => [...list, cc]);
+    setSaveCompFor(null);
+    fireToast({ tone: 'success', title: 'Component saved', message: name + ' added to the Library.' });
+  };
+  const deleteCustomComponent = (id) => setCustomComponents(list => list.filter(c => c.id !== id));
+
+  // --- Shader code editor ---
+  const [shaderEditFor, setShaderEditFor] = React.useState(null); // node id being edited
+  const [shaderError, setShaderError] = React.useState(null);
+  const openShaderEditor = (id) => { setShaderError(null); setShaderEditFor(id); };
+  const setShaderCode = (code) => {
+    const n = nodesRef.current.find(x => x.id === shaderEditFor);
+    if (n) updateNode(shaderEditFor, { shader: { ...(n.shader || {}), on: true, code } });
+  };
+  const loadShaderPreset = (k) => {
+    const n = nodesRef.current.find(x => x.id === shaderEditFor);
+    if (n) updateNode(shaderEditFor, { shader: { ...(n.shader || {}), on: true, preset: k, code: shaderPresets[k] } });
+  };
+
+  // --- Plugin / animation command menu (⌘/Ctrl-K) ---
+  const [cmdOpen, setCmdOpen] = React.useState(false);
+  const [cmdQuery, setCmdQuery] = React.useState('');
+  // Enabled plugins contribute their actions; enabled animations become "Apply: <name>" commands.
+  const commands = React.useMemo(() => {
+    const cmds = [];
+    enabledItems.filter(i => i.type === 'plugin').forEach(pl => {
+      ((pl.data && pl.data.actions) || []).forEach(a => cmds.push({ id: pl.id + ':' + a.id, group: pl.name, label: a.label, shortcut: a.shortcut, type: a.type, params: a.params || {} }));
+    });
+    enabledItems.filter(i => i.type === 'animation').forEach(an => {
+      cmds.push({ id: 'anim:' + an.id, group: 'Animation', label: 'Apply: ' + an.name, type: 'applyStates', params: { states: (an.data && an.data.states) || {} } });
+    });
+    return cmds;
+  }, [enabledItems]);
+
+  // Fixed dispatcher — maps a declarative action to an existing editor op (no code execution).
+  const runCommand = React.useCallback((cmd) => {
+    const ids = selectedIdsRef.current;
+    if (!ids || !ids.length) { fireToast({ tone: 'warning', title: 'Select a component first' }); return; }
+    const p = cmd.params || {};
+    if (cmd.type === 'align') { alignNodes(ids, p.edge || 'hcenter'); }
+    else if (cmd.type === 'distribute') { distributeNodes(ids, p.axis || 'h'); }
+    else {
+      pushHistory();
+      if (cmd.type === 'applyStyle') ids.forEach(id => updateNode(id, p.props || {}));
+      else if (cmd.type === 'applyShader') ids.forEach(id => { const n = nodesRef.current.find(x => x.id === id); updateNode(id, { shader: { ...((n && n.shader) || {}), on: true, code: p.code, speed: (n && n.shader && n.shader.speed) || 1 } }); });
+      else if (cmd.type === 'applyStates') ids.forEach(id => { const n = nodesRef.current.find(x => x.id === id); updateNode(id, { states: { ...((n && n.states) || {}), ...(p.states || {}) } }); });
+      else if (cmd.type === 'autoStack') ids.forEach(id => updateNode(id, { layout: 'Flex column', gap: p.gap != null ? p.gap : 12 }));
+    }
+    setCmdOpen(false);
+    fireToast({ tone: 'success', title: cmd.label });
+  }, [updateNode, alignNodes, distributeNodes, pushHistory]);
+
+  // ⌘/Ctrl-K opens the menu; a single-key plugin shortcut runs its action (when not typing, with a selection).
+  React.useEffect(() => {
+    const onKey = (e) => {
+      const ae = document.activeElement || {};
+      const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName || '') || ae.isContentEditable;
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); setCmdQuery(''); setCmdOpen(o => !o); return; }
+      if (typing || e.ctrlKey || e.metaKey || e.altKey) return;
+      const key = (e.key || '').toLowerCase();
+      const cmd = commands.find(c => c.shortcut && c.shortcut.toLowerCase() === key);
+      if (cmd && selectedIdsRef.current && selectedIdsRef.current.length) { e.preventDefault(); runCommand(cmd); }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [commands, runCommand]);
 
   // --- Pages ---
   const selectPage = (id) => { setActivePageId(id); setSelectedIds([]); setActiveAnimId(null); };
@@ -981,7 +1133,7 @@ function LatticeApp() {
 
   const copyLink = () => {
     try {
-      const encoded = btoa(unescape(encodeURIComponent(JSON.stringify({ pages, activePageId, workflows, variables })))).replace(/=/g, '');
+      const encoded = btoa(unescape(encodeURIComponent(JSON.stringify({ pages, activePageId, workflows, variables, customComponents, enabledLibrary })))).replace(/=/g, '');
       const url = window.location.href.split('#')[0] + '#project=' + encoded;
       navigator.clipboard.writeText(url).then(() => {
         fireToast({ tone: 'success', title: 'Link copied to clipboard' });
@@ -1011,12 +1163,12 @@ function LatticeApp() {
   // Persist project + settings (standalone editor only; project canvases live in the DB)
   React.useEffect(() => {
     if (projectId) return;
-    try { localStorage.setItem('lattice_project_v2', JSON.stringify({ project: { pages, activePageId, workflows, variables }, settings })); } catch {}
-  }, [pages, activePageId, workflows, variables, settings, projectId]);
+    try { localStorage.setItem('lattice_project_v2', JSON.stringify({ project: { pages, activePageId, workflows, variables, customComponents, enabledLibrary }, settings })); } catch {}
+  }, [pages, activePageId, workflows, variables, customComponents, enabledLibrary, settings, projectId]);
 
   // Export / import the whole project as JSON (an editor tool)
   const exportProject = () => {
-    const blob = new Blob([JSON.stringify({ pages, activePageId, workflows, variables, settings }, null, 2)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify({ pages, activePageId, workflows, variables, customComponents, enabledLibrary, settings }, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url; a.download = (projectName || 'lattice-project').replace(/\s+/g, '-').toLowerCase() + '.json';
@@ -1035,6 +1187,8 @@ function LatticeApp() {
           const proj = withWorkflowDefaults(d);
           setPages(proj.pages); setActivePageId(proj.activePageId || proj.pages[0].id);
           setWorkflows(proj.workflows || []); setVariables(proj.variables || []);
+          setCustomComponents(proj.customComponents || []);
+          setEnabledLibrary(proj.enabledLibrary || []);
           setActiveWorkflowId((proj.workflows || [])[0]?.id || null);
           if (d.settings) setSettings(s => ({ ...s, ...d.settings }));
           setSelectedIds([]); historyRef.current = {}; bumpHistory();
@@ -1106,6 +1260,30 @@ function LatticeApp() {
     document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
     document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none';
   };
+  // Drag a horizontal divider to resize a left-panel section's height (Pages / Library). The bottom
+  // section (Layers) flexes to fill whatever height remains.
+  const startSectionResize = (key) => (e) => {
+    e.preventDefault();
+    // Base off the section's actual rendered height so a drag works whether it was fitting content
+    // (auto) or already at an explicit height.
+    const ref = key === 'pages' ? pagesSecRef : librarySecRef;
+    const base = ref.current ? ref.current.getBoundingClientRect().height : (panelH[key] || 120);
+    const sy = e.clientY;
+    const move = (ev) => {
+      const h = Math.max(60, Math.min(640, Math.round(base + (ev.clientY - sy))));
+      setPanelH(p => ({ ...p, [key]: h }));
+    };
+    const up = () => { document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); document.body.style.cursor = ''; document.body.style.userSelect = ''; };
+    document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
+    document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none';
+  };
+  const sectionDivider = (key) => (
+    <div onMouseDown={startSectionResize(key)} title="Drag to resize"
+      style={{ height: 7, flex: 'none', cursor: 'row-resize', background: 'transparent', borderBottom: '1px solid var(--border-subtle)' }}
+      onMouseEnter={e => { e.currentTarget.style.background = 'var(--border-strong)'; }}
+      onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }} />
+  );
+
   // Overlay the panel boundary (absolute, no layout width) so the center column sits flush against the
   // panels — otherwise a transparent gap strip shows beside the (lighter) page-tab bar.
   const resizer = (side) => (
@@ -1152,6 +1330,8 @@ function LatticeApp() {
         onHelp={() => setHelpOpen(true)}
         previewMode={previewMode} onTogglePreview={() => setPreviewMode(v => !v)} onRun={runApp}
         device={activeDevice} onSetDevice={setActiveDevice}
+        responsive={settings.responsive !== false}
+        desktopPreset={settings.desktopPreset} onSetDesktopPreset={setDesktopPreset}
         artboard={artboard} orientation={orient[activeDevice]}
         onToggleOrientation={toggleOrientation}
         customSize={settings.customSize} onSetCustomSize={setCustomSize}
@@ -1164,15 +1344,23 @@ function LatticeApp() {
       <div style={{ flex: 1, display: 'flex', minHeight: 0, position: 'relative' }}>
         {view === 'design' && (
           <aside style={sidebarStyle}>
-            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-              <PagesPanel pages={pages} activePageId={activePageId} onSelect={selectPage} onAdd={addPage} onRename={renamePage} onDelete={deletePage} />
-              <LibraryPanel onPlace={placeNode} />
-              <LayersTree
-                nodes={viewNodes} connections={connections} selectedIds={selectedIds}
-                onSelect={selectOne} onSelectMany={selectMany} onRename={renameNode} onSetParent={setParent}
-                onToggleVisibility={toggleVisibility} onToggleLock={toggleLock}
-                onReorder={reorderLayer} actions={actions}
-              />
+            <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+              <div ref={pagesSecRef} style={{ height: panelH.pages == null ? 'auto' : panelH.pages, maxHeight: panelH.pages == null ? 240 : undefined, flex: 'none', overflowY: 'auto' }}>
+                <PagesPanel pages={pages} activePageId={activePageId} onSelect={selectPage} onAdd={addPage} onRename={renamePage} onDelete={deletePage} />
+              </div>
+              {sectionDivider('pages')}
+              <div ref={librarySecRef} style={{ height: panelH.library == null ? 'auto' : panelH.library, flex: 'none', overflowY: 'auto' }}>
+                <LibraryPanel onPlace={placeNode} customComponents={customComponents} onDeleteCustom={deleteCustomComponent} libraryComponents={libraryComponents} />
+              </div>
+              {sectionDivider('library')}
+              <div style={{ flex: 1, minHeight: 60, overflowY: 'auto' }}>
+                <LayersTree
+                  nodes={viewNodes} connections={connections} selectedIds={selectedIds}
+                  onSelect={selectOne} onSelectMany={selectMany} onRename={renameNode} onSetParent={setParent}
+                  onToggleVisibility={toggleVisibility} onToggleLock={toggleLock}
+                  onReorder={reorderLayer} actions={actions}
+                />
+              </div>
             </div>
           </aside>
         )}
@@ -1225,11 +1413,14 @@ function LatticeApp() {
             connections={connections} onDelete={deleteNode} onDetach={detachNode}
             onDuplicate={() => selected && duplicateNodes([selected.id])}
             allNodes={viewNodes} onSetParent={setParent}
+            responsive={settings.responsive !== false}
             palette={settings.palette || []} pages={pages}
             workflows={workflows} variables={variables} pageVars={page.vars || []}
             editingState={editingState} onSetEditingState={setEditingStateReset}
             singleSelected={animValid ? true : selectedIds.length === 1}
             frameEditing={animValid} onOpenAnimEditor={openAnimEditor}
+            onSaveAsComponent={openSaveAsComponent} onEditShader={openShaderEditor}
+            shaderPresets={shaderPresets}
             onResetState={resetState}
             editingFrame={editingFrame} onSetEditingFrame={setEditingFrame}
             onAddCustomState={addCustomState} onUpdateCustomState={updateCustomState} onDeleteCustomState={deleteCustomState}
@@ -1279,6 +1470,13 @@ function LatticeApp() {
             <div style={{ fontSize: 13, color: 'var(--text-primary)' }}>Snap to grid</div>
             <Switch checked={settings.snap} onChange={v => setSettings(s => ({ ...s, snap: v }))} />
           </div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div>
+              <div style={{ fontSize: 13, color: 'var(--text-primary)' }}>Responsive (screen types)</div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>Show the device switcher and per-screen layouts.</div>
+            </div>
+            <Switch checked={settings.responsive !== false} onChange={v => setSettings(s => ({ ...s, responsive: v }))} />
+          </div>
           <Select
             label="Grid size" size="sm"
             options={['4', '8', '12', '16', '24']}
@@ -1304,6 +1502,25 @@ function LatticeApp() {
             </div>
           </div>
           <div style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: 14 }}>
+            <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--text-muted)', marginBottom: 10 }}>Assets &amp; Plugins</div>
+            {libraryItems.length === 0 ? (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+                Nothing installed yet. Add styles, shaders, animations or plugins from the
+                <a href="/ui_kits/lattice-app/#/market" target="_blank" rel="noreferrer" style={{ color: 'var(--blue-base)' }}> Market</a>.
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 220, overflowY: 'auto' }}>
+                {libraryItems.map(it => (
+                  <div key={it.id} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ fontSize: 9, fontFamily: 'var(--font-mono)', color: 'var(--text-disabled)', textTransform: 'uppercase', width: 62, flex: 'none' }}>{it.type}</span>
+                    <span style={{ fontSize: 12.5, color: 'var(--text-primary)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.name}</span>
+                    <Switch checked={enabledLibrary.includes(it.id)} onChange={() => toggleLibraryItem(it.id)} />
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: 14 }}>
             <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--text-muted)', marginBottom: 10 }}>Project file</div>
             <div style={{ display: 'flex', gap: 8 }}>
               <Button variant="outline" size="sm" fullWidth onClick={exportProject} iconLeft={<i data-lucide="download"></i>}>Export .json</Button>
@@ -1314,9 +1531,71 @@ function LatticeApp() {
         </div>
       </Dialog>
 
+      <Dialog open={!!saveCompFor} onClose={() => setSaveCompFor(null)} title="Save as component"
+        description="Save this component's current variant as a reusable Library item."
+        footer={
+          <>
+            <Button variant="ghost" size="sm" onClick={() => setSaveCompFor(null)}>Cancel</Button>
+            <Button variant="solid" size="sm" onClick={confirmSaveAsComponent} disabled={!saveCompName.trim()} iconLeft={<i data-lucide="save"></i>}>Save</Button>
+          </>
+        }>
+        <Input label="Component name" size="sm" value={saveCompName} placeholder="e.g. Primary CTA"
+          onChange={e => setSaveCompName(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter' && saveCompName.trim()) confirmSaveAsComponent(); }} />
+      </Dialog>
+
+      <Dialog open={!!shaderEditFor} onClose={() => setShaderEditFor(null)} title="Shader code" width={640}
+        description="GLSL fragment shader. Provided uniforms: u_time (seconds) and u_resolution (pixels)."
+        footer={<Button variant="solid" size="sm" onClick={() => setShaderEditFor(null)}>Done</Button>}>
+        {(() => {
+          const sn = nodes.find(n => n.id === shaderEditFor);
+          if (!sn) return null;
+          return (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div style={{ position: 'relative', height: 150, border: '1px solid var(--border-subtle)', overflow: 'hidden', background: 'var(--surface-inset)' }}>
+                {window.ShaderFill && <window.ShaderFill code={sn.shader && sn.shader.code} speed={sn.shader && sn.shader.speed} onError={setShaderError} />}
+              </div>
+              {shaderError && <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--status-danger-fg)', whiteSpace: 'pre-wrap', maxHeight: 72, overflow: 'auto' }}>{shaderError}</div>}
+              <textarea value={(sn.shader && sn.shader.code) || ''} onChange={e => setShaderCode(e.target.value)} spellCheck={false}
+                style={{ width: '100%', height: 210, resize: 'vertical', fontFamily: 'var(--font-mono)', fontSize: 12, lineHeight: 1.5, padding: 10, border: '1px solid var(--border-default)', background: 'var(--surface-inset)', color: 'var(--text-primary)', outline: 'none', boxSizing: 'border-box' }} />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Load preset:</span>
+                {Object.keys(shaderPresets).map(k => (
+                  <Button key={k} variant="ghost" size="sm" onClick={() => loadShaderPreset(k)}>{k}</Button>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
+      </Dialog>
+
       <Dialog open={!!previewDialog} onClose={() => setPreviewDialog(null)} title={previewDialog ? previewDialog.title : ''}
         footer={<Button variant="solid" size="sm" onClick={() => setPreviewDialog(null)}>Close</Button>}>
         <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{previewDialog && previewDialog.message ? previewDialog.message : 'Dialog opened from an interaction.'}</div>
+      </Dialog>
+
+      <Dialog open={cmdOpen} onClose={() => setCmdOpen(false)} title="Command menu" width={460}
+        description="Run plugin & animation actions on the current selection.">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <Input autoFocus iconLeft={<i data-lucide="search"></i>} placeholder="Search commands…" size="sm"
+            value={cmdQuery} onChange={e => setCmdQuery(e.target.value)} />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 300, overflowY: 'auto' }}>
+            {commands.filter(c => (c.label + ' ' + c.group).toLowerCase().includes(cmdQuery.trim().toLowerCase())).map(c => (
+              <button key={c.id} type="button" onClick={() => runCommand(c)}
+                style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '9px 10px', border: '1px solid var(--border-subtle)', background: 'var(--surface-card)', color: 'var(--text-primary)', cursor: 'pointer', textAlign: 'left', fontSize: 13 }}
+                onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--border-strong)'; }}
+                onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border-subtle)'; }}>
+                <span style={{ flex: 1, minWidth: 0 }}>{c.label}<span style={{ color: 'var(--text-disabled)', fontSize: 11, marginLeft: 8 }}>{c.group}</span></span>
+                {c.shortcut && <kbd style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)', background: 'var(--surface-inset)', border: '1px solid var(--border-subtle)', padding: '1px 6px' }}>{c.shortcut.toUpperCase()}</kbd>}
+              </button>
+            ))}
+            {commands.length === 0 && (
+              <div style={{ fontSize: 12.5, color: 'var(--text-muted)', padding: '10px 2px', lineHeight: 1.5 }}>
+                No plugins or animations enabled. Enable them in <strong style={{ color: 'var(--text-secondary)' }}>Settings → Assets &amp; Plugins</strong>.
+              </div>
+            )}
+          </div>
+        </div>
       </Dialog>
 
       <Dialog open={helpOpen} onClose={() => setHelpOpen(false)} title="Keyboard shortcuts"

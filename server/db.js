@@ -73,6 +73,15 @@ async function initSchema() {
       status TEXT NOT NULL DEFAULT 'paid',
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
+    CREATE TABLE IF NOT EXISTS library_items (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      type TEXT NOT NULL,        -- 'component' | 'shader' | 'animation' | 'template' | 'plugin'
+      name TEXT NOT NULL,
+      data JSONB NOT NULL DEFAULT '{}'::jsonb,   -- asset payload (props / glsl / frames / canvas / actions)
+      source TEXT,               -- market item id it was installed from, or 'custom'
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
   `);
 
   for (const p of PLAN_SEED) {

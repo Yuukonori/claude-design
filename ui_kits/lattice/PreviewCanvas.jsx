@@ -205,9 +205,15 @@ function renderShape(node) {
   const kind = pvKind(node);
   const fx = (window.nodeFx && window.nodeFx(node)) || {};
   const fillCss = (window.fillBg && window.fillBg(node)) || node.fillColor || 'var(--text-primary)';
+  const shaderOn = node.shader && node.shader.on && window.ShaderFill;
+  const shaderLayer = shaderOn ? <window.ShaderFill code={node.shader.code} speed={node.shader.speed} /> : null;
 
-  if (kind === 'rect') return <div style={{ width: '100%', height: '100%', background: fillCss, ...fx }} />;
-  if (kind === 'ellipse') return <div style={{ width: '100%', height: '100%', background: fillCss, ...fx, borderRadius: '50%' }} />;
+  if (kind === 'rect') return shaderOn
+    ? <div style={{ position: 'relative', width: '100%', height: '100%', overflow: 'hidden', ...fx }}>{shaderLayer}</div>
+    : <div style={{ width: '100%', height: '100%', background: fillCss, ...fx }} />;
+  if (kind === 'ellipse') return shaderOn
+    ? <div style={{ position: 'relative', width: '100%', height: '100%', overflow: 'hidden', ...fx, borderRadius: '50%' }}>{shaderLayer}</div>
+    : <div style={{ width: '100%', height: '100%', background: fillCss, ...fx, borderRadius: '50%' }} />;
   if (kind === 'line') {
     const t = node.borderWidth || 2;
     return <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', ...fx }}>
@@ -336,7 +342,9 @@ function pvRender(node) {
   }
   // container (frame / stack / grid / card / section) — no built-in border; it comes from the
   // Border setting via nodeFx (so Preview matches the editor, which draws containers borderless).
-  return <div style={{ ...box, background: fill || 'var(--surface-card)', padding: node.padding || 0 }} />;
+  // A shader fill sits behind the content, so keep the container transparent to let it show through.
+  const contBg = (node.shader && node.shader.on) ? (fill || 'transparent') : (fill || 'var(--surface-card)');
+  return <div style={{ ...box, background: contBg, padding: node.padding || 0 }} />;
 }
 
 // Wrap the rendered component in an effects layer (radius / border / shadow / glow / blur /
@@ -348,6 +356,18 @@ function PreviewNode({ node }) {
   let fx = window.nodeFx ? window.nodeFx(node) : null;
   // Inputs draw their own border (see above) — drop the duplicate wrapper border for them.
   if (fx && fx.border && pvKind(node) === 'input') { const { border, ...rest } = fx; fx = Object.keys(rest).length ? rest : null; }
+  // Shader fill: an animated WebGL texture behind the node's content, clipped to its radius.
+  if (node.shader && node.shader.on && window.ShaderFill) {
+    const radius = fx && fx.borderRadius;
+    return (
+      <div style={{ position: 'relative', width: '100%', height: '100%', ...(fx || {}) }}>
+        <div style={{ position: 'absolute', inset: 0, zIndex: 0, overflow: 'hidden', borderRadius: radius }}>
+          <window.ShaderFill code={node.shader.code} speed={node.shader.speed} />
+        </div>
+        <div style={{ position: 'relative', zIndex: 1, width: '100%', height: '100%' }}>{inner}</div>
+      </div>
+    );
+  }
   return fx ? <div style={{ width: '100%', height: '100%', ...fx }}>{inner}</div> : inner;
 }
 window.PreviewNode = PreviewNode;
