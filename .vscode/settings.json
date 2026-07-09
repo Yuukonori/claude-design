@@ -1,0 +1,10 @@
+{
+  // Turn off webhint feedback (Microsoft Edge Tools) for this workspace only.
+  // Nearly all 160 "problems" were webhint's `no-inline-styles` hint firing on `style={{…}}`,
+  // which is this design system's intentional pattern (its own components use inline styles,
+  // and many are dynamic so they can't move to static CSS). The genuine accessibility hints
+  // (button type, input labels) are already satisfied in the source, so nothing real is lost.
+  // Re-enable by setting this to true; `.hintrc` then keeps the inline-style noise suppressed
+  // while leaving the accessibility/other hints active.
+  "vscode-edge-devtools.webhint": false
+}

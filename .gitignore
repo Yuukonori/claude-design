@@ -1,0 +1,7 @@
+# Secrets — never commit real credentials
+.env
+server/.env
+*.local.env
+
+# Dependencies (note: node_modules is currently tracked in this repo; ignoring new noise)
+node_modules/

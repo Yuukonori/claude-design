@@ -5,29 +5,157 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<base href="/ui_kits/lattice/">
 <title>Lattice — Editor</title>
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/assets/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="/assets/favicon-180.png">
+<meta name="theme-color" content="#0B0D12">
 <link rel="stylesheet" href="../../styles.css">
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
 <script src="../../_ds_bundle.js"></script>
 <script src="https://unpkg.com/lucide@latest"></script>
-<style>html,body{margin:0;height:100%;background:var(--bg-app)}</style>
+<script>
+// Render Lucide icons by FILLING each <i data-lucide> in place (svg as a child) instead of
+// REPLACING the element. lucide.createIcons() swaps the <i> for an <svg>, which detaches the
+// node React created and tracks — so any later React remove/replace of that icon throws
+// "removeChild: node not a child" and unmounts the whole app. Filling keeps React owning the <i>.
+window.renderLucideIcons = function (root) {
+  var L = window.lucide;
+  if (!L || !L.createElement) { if (L && L.createIcons) L.createIcons(); return; }
+  var toPascal = function (name) {
+    return name.split('-').map(function (p) { return p ? p.charAt(0).toUpperCase() + p.slice(1) : ''; }).join('');
+  };
+  var els = (root || document).querySelectorAll('[data-lucide]');
+  for (var i = 0; i < els.length; i++) {
+    var el = els[i];
+    var name = el.getAttribute('data-lucide');
+    if (el.getAttribute('data-licon') === name) continue; // already rendered this glyph
+    var node = (L.icons && L.icons[toPascal(name)]) || L[toPascal(name)];
+    if (!node) continue;
+    var svg;
+    try { svg = L.createElement(node); } catch (e) { continue; }
+    if (!svg) continue;
+    if (el.style && el.style.width)  svg.setAttribute('width', parseFloat(el.style.width));
+    if (el.style && el.style.height) svg.setAttribute('height', parseFloat(el.style.height));
+    svg.style.display = 'block';
+    while (el.firstChild) el.removeChild(el.firstChild);
+    el.appendChild(svg);
+    el.setAttribute('data-licon', name);
+  }
+};
+</script>
+<style>html,body{margin:0;height:100%;background:var(--bg-app)}
+input[type=number]{-moz-appearance:textfield;appearance:textfield;cursor:ew-resize}
+input[type=number]:focus{cursor:text}
+input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
+/* Canvas/preview Input nodes only: a placeholder can't be styled inline, so it reads an inherited
+   custom property. Attribute-scoped so the design system's own inputs are untouched. */
+[data-lt-input]::placeholder{color:var(--lt-placeholder,var(--text-muted));opacity:1}
+/* Edge draws its own password reveal/clear button (::-ms-reveal / ::-ms-clear); hide it so it can't
+   sit next to our own show/hide toggle. Scoped to this editor page; Chrome ignores these pseudos. */
+input[type=password]::-ms-reveal,input[type=password]::-ms-clear{display:none!important}
+/* Canvas/preview icons only. Making the <i> the size authority keeps size reactive (the lucide
+   renderer bakes width/height onto the <svg> once and never revisits it), and a CSS stroke-width
+   rule overrides the svg's stroke-width presentation attribute. Attribute-scoped so the editor's
+   own chrome icons keep their existing behaviour. */
+[data-lt-icon]{display:inline-flex;align-items:center;justify-content:center;flex:none}
+[data-lt-icon]>svg{width:100%;height:100%;stroke-width:var(--lt-icon-sw,2)}
+/* VS Code-style page tab bar: thin scrollbar + close-button hover affordance */
+.lt-pagebar-scroll{scrollbar-width:thin;scrollbar-color:var(--border-strong) transparent}
+.lt-pagebar-scroll::-webkit-scrollbar{height:6px}
+.lt-pagebar-scroll::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:3px}
+.lt-pagebar-scroll::-webkit-scrollbar-track{background:transparent}
+.lt-page-close:hover{background:var(--surface-hover)!important;opacity:1!important}</style>
+<script>
+// Scrubby number inputs — press on any <input type=number> and drag horizontally to change its
+// value (drag RIGHT = increase, LEFT = decrease; hold Shift for ×10). A plain click still focuses
+// the field for typing. Uses the native value setter + a bubbled 'input' event so React's
+// controlled onChange (with its own clamping) runs exactly as if the user typed.
+(function () {
+  var valueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+  function n(v, d) { var f = parseFloat(v); return isFinite(f) ? f : d; }
+  function setValue(el, value) {
+    if (el.value === value) return;
+    valueSetter.call(el, value);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  var s = null; // { el, x0, v0, step, dec, min, max, moved }
+  document.addEventListener('mousedown', function (e) {
+    if (e.button !== 0) return;
+    var t = e.target;
+    if (!(t instanceof window.HTMLInputElement) || t.type !== 'number' || t.disabled || t.readOnly) return;
+    var step = n(t.step, 1) || 1;
+    s = { el: t, x0: e.clientX, v0: n(t.value, 0), step: step,
+      dec: (String(step).split('.')[1] || '').length,
+      min: t.min !== '' ? n(t.min, -Infinity) : -Infinity,
+      max: t.max !== '' ? n(t.max, Infinity) : Infinity, moved: false };
+  }, true);
+  document.addEventListener('mousemove', function (e) {
+    if (!s) return;
+    var dx = e.clientX - s.x0;
+    if (!s.moved) {
+      if (Math.abs(dx) < 3) return;         // below threshold: keep it a normal click
+      s.moved = true;
+      s.el.blur();
+      document.body.style.userSelect = 'none';
+      document.body.style.cursor = 'ew-resize';
+    }
+    e.preventDefault();
+    var units = Math.round(dx / 3) * (e.shiftKey ? 10 : 1);
+    var v = Math.min(s.max, Math.max(s.min, s.v0 + units * s.step));
+    setValue(s.el, s.dec ? String(parseFloat(v.toFixed(s.dec))) : String(Math.round(v)));
+  });
+  document.addEventListener('mouseup', function () {
+    if (s && s.moved) { document.body.style.userSelect = ''; document.body.style.cursor = ''; }
+    s = null;
+  });
+})();
+</script>
 </head>
 <body>
 <div id="root"></div>
+<script type="text/babel" src="ContextMenu.jsx" data-presets="react"></script>
+<script type="text/babel" src="chart.jsx" data-presets="react"></script>
+<script type="text/babel" src="IconPicker.jsx" data-presets="react"></script>
+<script type="text/babel" src="ColorField.jsx" data-presets="react"></script>
+<script type="text/babel" src="NodeStyle.jsx" data-presets="react"></script>
+<script type="text/babel" src="WorkflowEngine.jsx" data-presets="react"></script>
+<script type="text/babel" src="InspectorExtras.jsx" data-presets="react"></script>
 <script type="text/babel" src="Topbar.jsx" data-presets="react"></script>
+<script type="text/babel" src="PagesPanel.jsx" data-presets="react"></script>
 <script type="text/babel" src="LibraryPanel.jsx" data-presets="react"></script>
+<script type="text/babel" src="LayersTree.jsx" data-presets="react"></script>
 <script type="text/babel" src="Canvas.jsx" data-presets="react"></script>
+<script type="text/babel" src="PreviewCanvas.jsx" data-presets="react"></script>
 <script type="text/babel" src="Inspector.jsx" data-presets="react"></script>
 <script type="text/babel" src="CodePanel.jsx" data-presets="react"></script>
 <script type="text/babel" src="RelationshipsView.jsx" data-presets="react"></script>
+<script type="text/babel" src="WorkflowView.jsx" data-presets="react"></script>
+<script type="text/babel" src="WorkflowRunLog.jsx" data-presets="react"></script>
+<script type="text/babel" src="AnimCanvas.jsx" data-presets="react"></script>
 <script type="text/babel" src="App.jsx" data-presets="react"></script>
 <script type="text/babel" data-presets="react">
+  // Surfaces any uncaught render error as on-screen text instead of a blank near-black page.
+  class ErrBoundary extends React.Component {
+    constructor(p) { super(p); this.state = { err: null }; }
+    static getDerivedStateFromError(err) { return { err }; }
+    componentDidCatch(err) { console.error(err); }
+    render() {
+      if (this.state.err) return (
+        <pre style={{ position: 'fixed', inset: 0, margin: 0, padding: 24, overflow: 'auto', background: '#160b0b', color: '#ff9d9d', font: '12px/1.6 monospace', whiteSpace: 'pre-wrap', zIndex: 99999 }}>
+          {'Something crashed:\n\n' + (this.state.err.stack || this.state.err)}
+        </pre>
+      );
+      return this.props.children;
+    }
+  }
   const mount = () => {
     if (!window.LatticeApp) return setTimeout(mount, 30);
-    ReactDOM.createRoot(document.getElementById('root')).render(<LatticeApp />);
-    setTimeout(() => window.lucide && window.lucide.createIcons(), 80);
+    ReactDOM.createRoot(document.getElementById('root')).render(<ErrBoundary><LatticeApp /></ErrBoundary>);
+    setTimeout(() => window.renderLucideIcons && window.renderLucideIcons(), 80);
   };
   mount();
 </script>

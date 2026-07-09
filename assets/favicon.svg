@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="Lattice">
+  <title>Lattice</title>
+  <!-- Tile background: the mark carries its own surface so it reads on light and dark tab bars. -->
+  <rect width="32" height="32" rx="7" fill="#0B0D12"/>
+  <!-- The lattice: a 3x3 grid, strokes weighted so they survive a 16px downscale. -->
+  <g stroke="#FFFFFF" stroke-opacity="0.5" stroke-width="1.5" fill="none">
+    <rect x="4.75" y="4.75" width="22.5" height="22.5" rx="1.5"/>
+    <path d="M12 4.75V27.25M20 4.75V27.25M4.75 12H27.25M4.75 20H27.25"/>
+  </g>
+  <!-- The filled centre cell — the anchor of the brand mark. -->
+  <rect x="12" y="12" width="8" height="8" fill="#FFFFFF"/>
+</svg>
