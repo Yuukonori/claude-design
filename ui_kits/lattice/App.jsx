@@ -136,9 +136,23 @@ function withWorkflowDefaults(project) {
     variables: project.variables || [],
     customComponents: project.customComponents || [],
     enabledLibrary: project.enabledLibrary || [],
+    assets: project.assets || [],   // Code-view file system: user files/folders + uploaded binaries
     pages: (project.pages || []).map(p => ({ ...p, vars: p.vars || [] })),
   };
 }
+
+// Resolve a node's image `src`: an http/data/blob URL passes through; an internal asset path
+// (e.g. "src/assets/logo.png") is looked up in the project's assets and swapped for its data URL,
+// so images referenced by internal path render on the canvas, in Preview, and in exports.
+window.resolveAssetSrc = window.resolveAssetSrc || function (src) {
+  if (!src || /^(https?:|data:|blob:|\/\/)/i.test(src)) return src;
+  const list = window.__latticeAssets || [];
+  const key = src.replace(/^\.?\//, '');
+  const base = key.split('/').pop();
+  const hit = list.find(a => a.type === 'file' && (a.path === key || a.path === 'src/' + key || a.path.replace(/^src\//, '') === key)) ||
+              list.find(a => a.type === 'file' && a.dataUrl && a.path.split('/').pop() === base);
+  return hit && hit.dataUrl ? hit.dataUrl : src;
+};
 
 // Props captured when saving a configured node as a reusable custom component (its "variant").
 const VARIANT_PROP_KEYS = ['label', 'variant', 'btnSize', 'tone', 'fillColor', 'gradient', 'shader',
@@ -191,6 +205,19 @@ function LatticeApp() {
   const [customComponents, setCustomComponents] = React.useState(boot.project.customComponents || []); // saved variants
   const [libraryItems, setLibraryItems] = React.useState([]);                                          // this account's installed assets/plugins
   const [enabledLibrary, setEnabledLibrary] = React.useState(boot.project.enabledLibrary || []);       // library item ids enabled for THIS project
+  const [assets, setAssets] = React.useState(boot.project.assets || []);                                // Code-view files/folders + uploaded images
+  // Keep the global asset table in sync so window.resolveAssetSrc (used by the node renderer) sees them.
+  React.useEffect(() => { window.__latticeAssets = assets; }, [assets]);
+  // Add an uploaded image under src/assets/ and return its internal path (used by the Inspector so a
+  // component can reference an image by internal path instead of a URL).
+  const addImageAsset = (name, dataUrl, mime) => {
+    const safe = (name || 'image').replace(/[^a-zA-Z0-9._-]+/g, '-');
+    const taken = new Set(assets.map(a => a.path));
+    let path = 'src/assets/' + safe, i = 1;
+    while (taken.has(path)) path = 'src/assets/' + safe.replace(/(\.[^.]+)?$/, '-' + (i++) + '$1');
+    setAssets(list => list.concat([{ id: 'as_' + Date.now().toString(36), path, type: 'file', mime, dataUrl }]));
+    return path;
+  };
   const toggleLibraryItem = (id) => setEnabledLibrary(list => list.includes(id) ? list.filter(x => x !== id) : [...list, id]);
   // Items enabled for this project, resolved into the editor's existing systems.
   const enabledItems = React.useMemo(() => libraryItems.filter(i => enabledLibrary.includes(i.id)), [libraryItems, enabledLibrary]);
@@ -392,7 +419,7 @@ function LatticeApp() {
     const t = setTimeout(() => {
       fetch('/api/projects/' + projectId, {
         method: 'PUT', credentials: 'include', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ canvas: { pages, activePageId, workflows, variables, customComponents, enabledLibrary } }),
+        body: JSON.stringify({ canvas: { pages, activePageId, workflows, variables, customComponents, enabledLibrary, assets } }),
       }).catch(() => {}).finally(() => setSaving(false));
     }, 800);
     return () => clearTimeout(t);
@@ -1171,12 +1198,12 @@ function LatticeApp() {
   // Persist project + settings (standalone editor only; project canvases live in the DB)
   React.useEffect(() => {
     if (projectId) return;
-    try { localStorage.setItem('lattice_project_v2', JSON.stringify({ project: { pages, activePageId, workflows, variables, customComponents, enabledLibrary }, settings })); } catch {}
+    try { localStorage.setItem('lattice_project_v2', JSON.stringify({ project: { pages, activePageId, workflows, variables, customComponents, enabledLibrary, assets }, settings })); } catch {}
   }, [pages, activePageId, workflows, variables, customComponents, enabledLibrary, settings, projectId]);
 
   // Export / import the whole project as JSON (an editor tool)
   const exportProject = () => {
-    const blob = new Blob([JSON.stringify({ pages, activePageId, workflows, variables, customComponents, enabledLibrary, settings }, null, 2)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify({ pages, activePageId, workflows, variables, customComponents, enabledLibrary, assets, settings }, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url; a.download = (projectName || 'lattice-project').replace(/\s+/g, '-').toLowerCase() + '.json';
@@ -1197,6 +1224,7 @@ function LatticeApp() {
           setWorkflows(proj.workflows || []); setVariables(proj.variables || []);
           setCustomComponents(proj.customComponents || []);
           setEnabledLibrary(proj.enabledLibrary || []);
+          setAssets(proj.assets || []);
           setActiveWorkflowId((proj.workflows || [])[0]?.id || null);
           if (d.settings) setSettings(s => ({ ...s, ...d.settings }));
           setSelectedIds([]); historyRef.current = {}; bumpHistory();
@@ -1395,7 +1423,7 @@ function LatticeApp() {
                 />
               )}
               {view === 'design' && previewMode && <PreviewCanvas nodes={viewNodes} connections={connections} artboard={artboard} device={activeDevice} onAction={onPreviewAction} runtime={previewRuntime} runtimeProps={runtimeProps} />}
-              {view === 'code' && <CodePanel pages={pages} activePageId={activePageId} />}
+              {view === 'code' && <CodePanel pages={pages} activePageId={activePageId} assets={assets} onChangeAssets={setAssets} projectName={projectName} settings={settings} />}
               {view === 'rel' && (
                 <RelationshipsView nodes={nodes} connections={connections} onSelect={(id) => { selectOne(id); setView('design'); }} />
               )}
@@ -1423,6 +1451,7 @@ function LatticeApp() {
             allNodes={viewNodes} onSetParent={setParent}
             responsive={settings.responsive !== false}
             palette={settings.palette || []} pages={pages}
+            assets={assets} onAddAsset={addImageAsset}
             workflows={workflows} variables={variables} pageVars={page.vars || []}
             editingState={editingState} onSetEditingState={setEditingStateReset}
             singleSelected={animValid ? true : selectedIds.length === 1}

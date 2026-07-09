@@ -15,7 +15,7 @@ const SHAPE = new Set(['rect', 'ellipse', 'line', 'triangle', 'star', 'polygon',
 const BORDER_INTRINSIC = new Set(['input', 'textarea']);
 window.kindOf = kindOf;
 
-function Inspector({ node, onChange, onBaseChange, onRename, connections, onDelete, onDetach, onDuplicate, allNodes = [], onSetParent, responsive = true, palette = [], pages = [], workflows = [], variables = [], pageVars = [], editingState = 'default', onSetEditingState, singleSelected = true, onResetState, editingFrame = null, onSetEditingFrame, onAddCustomState, onUpdateCustomState, onDeleteCustomState, onAddFrame, onUpdateFrame, onDeleteFrame, frameEditing = false, onOpenAnimEditor, onSaveAsComponent, onEditShader, shaderPresets, width }) {
+function Inspector({ node, onChange, onBaseChange, onRename, connections, onDelete, onDetach, onDuplicate, allNodes = [], onSetParent, responsive = true, palette = [], pages = [], workflows = [], variables = [], pageVars = [], editingState = 'default', onSetEditingState, singleSelected = true, onResetState, editingFrame = null, onSetEditingFrame, onAddCustomState, onUpdateCustomState, onDeleteCustomState, onAddFrame, onUpdateFrame, onDeleteFrame, frameEditing = false, onOpenAnimEditor, onSaveAsComponent, onEditShader, shaderPresets, width, assets = [], onAddAsset }) {
   const SHADERS = shaderPresets || window.SHADER_PRESETS || { plasma: '' };
   const { Select, Switch, Tag, Badge, Button, Input } = window.LatticeDesignSystem_e801cb;
 
@@ -40,6 +40,32 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
   const rel = connections.filter(c => c.from === node.id || c.to === node.id);
   const set = (k) => (v) => onChange(node.id, { [k]: v });
   const setNum = (k, min) => (v) => onChange(node.id, { [k]: Math.max(min ?? -99999, +v || 0) });
+  // Image source: upload a binary (stored as an internal asset path) or pick an existing asset. The
+  // node's `src` then holds an internal path like "src/assets/logo.png", resolved at render time.
+  const assetImages = (assets || []).filter(a => a.type === 'file' && a.dataUrl && /\.(png|jpe?g|gif|svg|webp|avif|ico|bmp)$/i.test(a.path));
+  const pickImageAsset = () => {
+    if (!onAddAsset) return;
+    const input = document.createElement('input');
+    input.type = 'file'; input.accept = 'image/*';
+    input.onchange = () => {
+      const file = input.files && input.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => { const path = onAddAsset(file.name, reader.result, file.type); if (path) set('src')(path); };
+      reader.readAsDataURL(file);
+    };
+    input.click();
+  };
+  const renderImgSource = () => (
+    <div style={{ display: 'flex', gap: 6 }}>
+      <Button variant="outline" size="sm" onClick={pickImageAsset} iconLeft={<i data-lucide="upload"></i>}>Upload</Button>
+      {assetImages.length > 0 && (
+        <Select size="sm" value="" title="Use an asset by internal path" wrapStyle={{ flex: 1 }}
+          onChange={e => { if (e.target.value) set('src')(e.target.value); }}
+          options={[{ value: '', label: 'From assets…' }].concat(assetImages.map(a => ({ value: a.path, label: a.path.split('/').pop() })))} />
+      )}
+    </div>
+  );
   // W/H editing keeps the ratio when "Lock aspect ratio" is on
   const ratio = (node.w && node.h) ? node.w / node.h : 1;
   const setW = (v) => { const w = Math.max(12, +v || 12); if (node.lockAspect) onChange(node.id, { w, h: Math.max(8, Math.round(w / ratio)) }); else set('w')(w); };
@@ -417,7 +443,8 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
         {kind === 'image' && (
           <Section title="Image">
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              <Input label="Source URL" size="sm" placeholder="https://…" value={node.src || ''} onChange={e => set('src')(e.target.value)} />
+              <Input label="Source (URL or asset path)" size="sm" placeholder="https://… or src/assets/…" value={node.src || ''} onChange={e => set('src')(e.target.value)} />
+              {renderImgSource()}
               <Input label="Alt text" size="sm" placeholder="Description" value={node.label || ''} onChange={e => onChange(node.id, { label: e.target.value })} />
               <Select label="Fit" size="sm" options={['cover', 'contain', 'fill', 'none']} value={node.fit || 'cover'} onChange={e => set('fit')(e.target.value)} />
               <NumRow label="Radius" value={node.radius ?? 0} min={0} onChange={setNum('radius', 0)} />
@@ -429,7 +456,8 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
           <Section title="Avatar">
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <Input label="Name (initials)" size="sm" value={node.label || ''} placeholder="Rin Sato" onChange={e => onChange(node.id, { label: e.target.value })} />
-              <Input label="Image URL" size="sm" placeholder="https://…" value={node.src || ''} onChange={e => set('src')(e.target.value)} />
+              <Input label="Image (URL or asset path)" size="sm" placeholder="https://… or src/assets/…" value={node.src || ''} onChange={e => set('src')(e.target.value)} />
+              {renderImgSource()}
             </div>
           </Section>
         )}

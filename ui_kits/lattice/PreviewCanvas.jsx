@@ -317,8 +317,10 @@ function pvRender(node) {
     </div>;
   }
   if (kind === 'image') {
-    return node.src
-      ? <img src={node.src} alt={node.label || ''} style={{ ...box, objectFit: node.fit || 'cover', borderRadius: node.radius || 0, border: '1px solid var(--border-subtle)' }} />
+    // Resolve an internal asset path (e.g. "src/assets/logo.png") to its data URL; URLs pass through.
+    const imgSrc = window.resolveAssetSrc ? window.resolveAssetSrc(node.src) : node.src;
+    return imgSrc
+      ? <img src={imgSrc} alt={node.label || ''} style={{ ...box, objectFit: node.fit || 'cover', borderRadius: node.radius || 0, border: '1px solid var(--border-subtle)' }} />
       : <div style={{ ...box, background: fill || 'var(--surface-card)', border: '1px solid var(--border-subtle)', borderRadius: node.radius || 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-disabled)' }}><i data-lucide="image" style={{ width: 24, height: 24 }}></i></div>;
   }
   if (kind === 'divider') {
