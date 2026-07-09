@@ -57,6 +57,13 @@ window.renderLucideIcons = function (root) {
 <script type="text/babel" src="store.jsx" data-presets="react"></script>
 <script type="text/babel" src="components.jsx" data-presets="react"></script>
 <script type="text/babel" src="../lattice/ShaderFill.jsx" data-presets="react"></script>
+<!-- Editor render pipeline, reused so the Market shows real component/template previews (not icons).
+     PreviewNode needs a WorkflowRuntime context; the editor supplies it via WorkflowEngine.jsx, but the
+     product app only renders static previews, so a null context shim is enough. -->
+<script>window.WorkflowRuntime = window.WorkflowRuntime || React.createContext(null);</script>
+<script type="text/babel" src="../lattice/NodeStyle.jsx" data-presets="react"></script>
+<script type="text/babel" src="../lattice/chart.jsx" data-presets="react"></script>
+<script type="text/babel" src="../lattice/PreviewCanvas.jsx" data-presets="react"></script>
 <script type="text/babel" src="pages_home.jsx" data-presets="react"></script>
 <script type="text/babel" src="pages_auth.jsx" data-presets="react"></script>
 <script type="text/babel" src="pages_pricing.jsx" data-presets="react"></script>

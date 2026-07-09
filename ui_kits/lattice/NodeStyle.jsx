@@ -95,7 +95,8 @@ function nodeFx(node) {
 // Kinds that render text somewhere. `textFx` only emits *inheritable* properties, so it can be
 // spread on whatever element a kind already returns and the label inside (even a DS component)
 // picks it up.
-const TEXT_KINDS = new Set(['text', 'heading', 'link', 'button', 'badge', 'checkbox', 'switch', 'list', 'input', 'avatar']);
+const TEXT_KINDS = new Set(['text', 'heading', 'link', 'button', 'badge', 'checkbox', 'switch', 'list', 'input', 'avatar',
+  'textarea', 'radio', 'breadcrumb']);
 // background-clip:text only works where the element directly wraps the text with no competing background.
 const TEXT_GRADIENT_KINDS = new Set(['text', 'heading', 'link']);
 

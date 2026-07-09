@@ -1,10 +1,11 @@
 {
-  "version": 1,
+  "version": 2,
   "componentStyles": [
     {
       "id": "cs-primary-cta",
       "name": "Primary CTA",
       "description": "Bold solid call-to-action button.",
+      "group": "Buttons",
       "base": "button",
       "props": { "variant": "solid", "label": "Get started", "btnSize": "lg", "fillColor": "#6366F1", "textColor": "#ffffff", "radius": 10, "fontWeight": "semibold", "w": 170, "h": 48 }
     },
@@ -12,22 +13,222 @@
       "id": "cs-ghost-pill",
       "name": "Ghost pill",
       "description": "Rounded outline button for secondary actions.",
+      "group": "Buttons",
       "base": "button",
       "props": { "variant": "outline", "label": "Learn more", "radius": 999, "borderWidth": 1, "w": 150, "h": 40 }
     },
     {
+      "id": "cs-gradient-btn",
+      "name": "Gradient button",
+      "description": "Vivid gradient fill for hero moments.",
+      "group": "Buttons",
+      "base": "button",
+      "props": { "variant": "solid", "label": "Upgrade", "btnSize": "lg", "radius": 10, "fontWeight": "semibold", "w": 160, "h": 48, "gradient": { "type": "linear", "angle": 135, "stops": [ { "color": "#6366F1", "pos": 0 }, { "color": "#EC4899", "pos": 100 } ] } }
+    },
+    {
+      "id": "cs-danger-btn",
+      "name": "Danger button",
+      "description": "Outlined destructive action.",
+      "group": "Buttons",
+      "base": "button",
+      "props": { "variant": "danger", "label": "Delete", "btnSize": "md", "radius": 8, "borderWidth": 1, "w": 130, "h": 40 }
+    },
+    {
+      "id": "cs-icon-btn",
+      "name": "Icon button",
+      "description": "Compact square icon-only control.",
+      "group": "Buttons",
+      "base": "button",
+      "props": { "variant": "outline", "label": "", "btnIcon": "settings", "btnIconPos": "only", "radius": 10, "borderWidth": 1, "w": 44, "h": 44 }
+    },
+    {
+      "id": "cs-soft-btn",
+      "name": "Soft button",
+      "description": "Low-contrast tinted button.",
+      "group": "Buttons",
+      "base": "button",
+      "props": { "variant": "solid", "label": "Details", "btnSize": "md", "fillColor": "rgba(255,255,255,0.10)", "radius": 10, "w": 130, "h": 42 }
+    },
+
+    {
       "id": "cs-glass-card",
       "name": "Glass card",
       "description": "Frosted translucent surface with backdrop blur.",
+      "group": "Cards & panels",
       "base": "card",
       "props": { "fillColor": "rgba(255,255,255,0.06)", "radius": 16, "borderWidth": 1, "borderColor": "rgba(255,255,255,0.18)", "padding": 20, "w": 280, "h": 180, "effects": [ { "type": "bgblur", "blur": 12, "on": true } ] }
     },
     {
+      "id": "cs-elevated-card",
+      "name": "Elevated card",
+      "description": "Surface panel lifted with a soft drop shadow.",
+      "group": "Cards & panels",
+      "base": "card",
+      "props": { "fillColor": "var(--surface-card)", "radius": 14, "borderWidth": 1, "borderColor": "var(--border-subtle)", "padding": 20, "w": 260, "h": 150, "effects": [ { "type": "drop", "x": 0, "y": 18, "blur": 40, "spread": -12, "color": "rgba(0,0,0,0.55)", "on": true } ] }
+    },
+    {
+      "id": "cs-gradient-panel",
+      "name": "Gradient panel",
+      "description": "Deep indigo-to-void gradient surface.",
+      "group": "Cards & panels",
+      "base": "card",
+      "props": { "radius": 16, "padding": 20, "w": 260, "h": 150, "gradient": { "type": "linear", "angle": 160, "stops": [ { "color": "#312E81", "pos": 0 }, { "color": "#0B0D12", "pos": 100 } ] } }
+    },
+    {
+      "id": "cs-outline-panel",
+      "name": "Outline panel",
+      "description": "Sharp, architectural bordered frame.",
+      "group": "Cards & panels",
+      "base": "frame",
+      "props": { "fillColor": "transparent", "borderWidth": 1, "borderColor": "var(--border-strong)", "w": 260, "h": 140 }
+    },
+    {
+      "id": "cs-neon-panel",
+      "name": "Neon panel",
+      "description": "Dark card ringed with an indigo glow.",
+      "group": "Cards & panels",
+      "base": "card",
+      "props": { "fillColor": "#0B0D12", "radius": 14, "borderWidth": 1, "borderColor": "#6366F1", "w": 240, "h": 140, "effects": [ { "type": "glow", "blur": 24, "spread": 1, "color": "rgba(99,102,241,0.5)", "on": true } ] }
+    },
+
+    {
+      "id": "cs-hero-display",
+      "name": "Hero display",
+      "description": "Large editorial serif headline.",
+      "group": "Typography",
+      "base": "heading",
+      "props": { "label": "Design the structure", "fontFamily": "Serif display", "fontSize": 40, "fontWeight": "semibold", "w": 420, "h": 56 }
+    },
+    {
+      "id": "cs-serif-quote",
+      "name": "Serif italic",
+      "description": "Italic serif for editorial emphasis.",
+      "group": "Typography",
+      "base": "text",
+      "props": { "label": "Not just the surface.", "fontFamily": "Serif display", "fontStyle": "italic", "fontSize": 26, "textColor": "var(--text-secondary)", "w": 320, "h": 44 }
+    },
+    {
+      "id": "cs-gradient-heading",
+      "name": "Gradient heading",
+      "description": "Grotesk heading with a gradient text fill.",
+      "group": "Typography",
+      "base": "heading",
+      "props": { "label": "Gradient type", "fontFamily": "Grotesk (UI)", "fontSize": 38, "fontWeight": "bold", "w": 300, "h": 50, "textGradient": { "type": "linear", "angle": 90, "stops": [ { "color": "#818CF8", "pos": 0 }, { "color": "#F472B6", "pos": 100 } ] } }
+    },
+    {
+      "id": "cs-mono-label",
+      "name": "Mono label",
+      "description": "Monospaced, wide-tracked data label.",
+      "group": "Typography",
+      "base": "text",
+      "props": { "label": "SYSTEM · v1.0", "fontFamily": "Mono", "fontSize": 13, "letterSpacing": 2, "textTransform": "uppercase", "textColor": "var(--text-muted)", "w": 220, "h": 24 }
+    },
+    {
+      "id": "cs-eyebrow",
+      "name": "Eyebrow",
+      "description": "Tiny all-caps overline label.",
+      "group": "Typography",
+      "base": "text",
+      "props": { "label": "COMPONENTS", "fontFamily": "Grotesk (UI)", "fontSize": 11, "fontWeight": "semibold", "letterSpacing": 3, "textTransform": "uppercase", "textColor": "var(--text-muted)", "w": 180, "h": 18 }
+    },
+
+    {
+      "id": "cs-search-field",
+      "name": "Search field",
+      "description": "Pill input with a leading search icon.",
+      "group": "Forms",
+      "base": "input",
+      "props": { "placeholder": "Search components", "prefixIcon": "search", "inputSize": "md", "borderWidth": 1, "borderColor": "var(--border-default)", "radius": 999, "w": 240, "h": 40 }
+    },
+    {
+      "id": "cs-labeled-input",
+      "name": "Labeled input",
+      "description": "Field with label and helper text.",
+      "group": "Forms",
+      "base": "input",
+      "props": { "fieldLabel": "Email", "placeholder": "you@company.com", "helperText": "We'll never share it.", "inputSize": "md", "borderWidth": 1, "radius": 8, "w": 260, "h": 70 }
+    },
+    {
+      "id": "cs-switch-row",
+      "name": "Switch row",
+      "description": "Labeled toggle switch.",
+      "group": "Forms",
+      "base": "switch",
+      "props": { "label": "Enable sync", "checked": true, "w": 150, "h": 28 }
+    },
+
+    {
       "id": "cs-stat-badge",
       "name": "Status badge",
       "description": "Compact success badge.",
+      "group": "Badges & status",
       "base": "badge",
       "props": { "tone": "success", "label": "New", "w": 72, "h": 26 }
+    },
+    {
+      "id": "cs-info-badge",
+      "name": "Info badge",
+      "description": "Muted informational badge.",
+      "group": "Badges & status",
+      "base": "badge",
+      "props": { "tone": "info", "label": "Beta", "w": 66, "h": 26 }
+    },
+    {
+      "id": "cs-success-alert",
+      "name": "Success alert",
+      "description": "Inline confirmation banner.",
+      "group": "Badges & status",
+      "base": "alert",
+      "props": { "tone": "success", "label": "Saved", "alertText": "Your changes are live.", "alertIcon": "circle-check", "fillColor": "var(--surface-card)", "w": 300, "h": 62 }
+    },
+    {
+      "id": "cs-warning-alert",
+      "name": "Warning alert",
+      "description": "Inline caution banner.",
+      "group": "Badges & status",
+      "base": "alert",
+      "props": { "tone": "warning", "label": "Heads up", "alertText": "Unsaved changes will be lost.", "alertIcon": "triangle-alert", "fillColor": "var(--surface-card)", "w": 300, "h": 62 }
+    },
+
+    {
+      "id": "cs-kpi-stat",
+      "name": "KPI stat",
+      "description": "Metric with trend delta.",
+      "group": "Data & charts",
+      "base": "stat",
+      "props": { "label": "Revenue", "statValue": "$48.2k", "statDelta": "+12.4%", "statTrend": "up", "w": 180, "h": 90 }
+    },
+    {
+      "id": "cs-mini-table",
+      "name": "Mini table",
+      "description": "Striped three-column table.",
+      "group": "Data & charts",
+      "base": "table",
+      "props": { "tableCols": "Name,Role,Status", "tableRows": "Ana,Design,Active\nBen,Eng,Away\nIris,PM,Active", "striped": true, "fontSize": 12.5, "w": 300, "h": 128 }
+    },
+    {
+      "id": "cs-bar-chart",
+      "name": "Bar chart",
+      "description": "Categorical bar series.",
+      "group": "Data & charts",
+      "base": "chart",
+      "props": { "chartType": "bar", "chartData": "12,18,9,24,16,21", "chartLabels": "Jan,Feb,Mar,Apr,May,Jun", "chartColor": "#6366F1", "w": 240, "h": 140 }
+    },
+    {
+      "id": "cs-line-chart",
+      "name": "Line chart",
+      "description": "Trend line over time.",
+      "group": "Data & charts",
+      "base": "chart",
+      "props": { "chartType": "line", "chartData": "8,14,10,20,17,26", "chartColor": "#22D3EE", "w": 240, "h": 140 }
+    },
+    {
+      "id": "cs-donut-chart",
+      "name": "Donut chart",
+      "description": "Proportional donut breakdown.",
+      "group": "Data & charts",
+      "base": "chart",
+      "props": { "chartType": "donut", "chartData": "42,28,18,12", "chartLabels": "Design,Eng,PM,Ops", "w": 190, "h": 140 }
     }
   ],
   "shaders": [
@@ -48,6 +249,36 @@
       "name": "Film grain",
       "description": "Animated grain over a soft gradient.",
       "code": "float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\nvoid main(){\n  vec2 uv = gl_FragCoord.xy / u_resolution.xy;\n  float g = hash(floor(gl_FragCoord.xy) + u_time);\n  vec3 base = mix(vec3(0.08, 0.09, 0.12), vec3(0.16, 0.17, 0.22), uv.y);\n  vec3 col = base + (g - 0.5) * 0.12;\n  gl_FragColor = vec4(col, 1.0);\n}"
+    },
+    {
+      "id": "sh-mesh",
+      "name": "Mesh gradient",
+      "description": "Slow-shifting multi-color mesh.",
+      "code": "void main(){\n  vec2 uv = gl_FragCoord.xy / u_resolution.xy;\n  float t = u_time * 0.3;\n  float a = sin(uv.x * 3.0 + t) + cos(uv.y * 3.0 - t);\n  vec3 c1 = vec3(0.36, 0.40, 0.95);\n  vec3 c2 = vec3(0.95, 0.45, 0.72);\n  vec3 c3 = vec3(0.20, 0.85, 0.80);\n  vec3 col = mix(mix(c1, c2, uv.x), c3, 0.5 + 0.5 * sin(a));\n  gl_FragColor = vec4(col, 1.0);\n}"
+    },
+    {
+      "id": "sh-plasma",
+      "name": "Plasma",
+      "description": "Classic undulating plasma field.",
+      "code": "void main(){\n  vec2 uv = gl_FragCoord.xy / u_resolution.xy;\n  float t = u_time * 0.6;\n  float v = sin(uv.x * 8.0 + t) + sin(uv.y * 8.0 - t) + sin((uv.x + uv.y) * 8.0 + t);\n  v *= 0.33;\n  vec3 col = 0.5 + 0.5 * cos(6.2831 * (v + vec3(0.0, 0.33, 0.67)));\n  col = mix(vec3(0.05, 0.06, 0.12), col, 0.85);\n  gl_FragColor = vec4(col, 1.0);\n}"
+    },
+    {
+      "id": "sh-noise",
+      "name": "Noise clouds",
+      "description": "Layered value-noise clouds.",
+      "code": "float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\nfloat noise(vec2 p){\n  vec2 i = floor(p), f = fract(p);\n  float a = hash(i), b = hash(i + vec2(1.0, 0.0));\n  float c = hash(i + vec2(0.0, 1.0)), d = hash(i + vec2(1.0, 1.0));\n  vec2 u = f * f * (3.0 - 2.0 * f);\n  return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;\n}\nvoid main(){\n  vec2 uv = gl_FragCoord.xy / u_resolution.xy;\n  float n = 0.5 * noise(uv * 6.0 + u_time * 0.4) + 0.5 * noise(uv * 12.0 - u_time * 0.25);\n  vec3 col = mix(vec3(0.05, 0.07, 0.12), vec3(0.42, 0.55, 0.95), n);\n  gl_FragColor = vec4(col, 1.0);\n}"
+    },
+    {
+      "id": "sh-waves",
+      "name": "Waves",
+      "description": "Flowing horizontal wave stripes.",
+      "code": "void main(){\n  vec2 uv = gl_FragCoord.xy / u_resolution.xy;\n  float t = u_time * 0.6;\n  float y = uv.y + sin(uv.x * 10.0 + t) * 0.04 + sin(uv.x * 5.0 - t) * 0.05;\n  float s = 0.5 + 0.5 * sin(y * 20.0);\n  vec3 col = mix(vec3(0.06, 0.09, 0.18), vec3(0.30, 0.55, 0.95), s);\n  gl_FragColor = vec4(col, 1.0);\n}"
+    },
+    {
+      "id": "sh-dots",
+      "name": "Halftone dots",
+      "description": "Pulsing halftone dot grid.",
+      "code": "void main(){\n  vec2 uv = gl_FragCoord.xy / u_resolution.xy;\n  vec2 g = fract(uv * 24.0) - 0.5;\n  float t = u_time * 0.8;\n  float r = 0.30 + 0.18 * sin(uv.x * 6.0 + uv.y * 6.0 + t);\n  float d = smoothstep(r, r - 0.08, length(g));\n  vec3 bg = mix(vec3(0.06, 0.07, 0.11), vec3(0.10, 0.12, 0.20), uv.y);\n  vec3 col = mix(bg, vec3(0.55, 0.60, 0.95), d);\n  gl_FragColor = vec4(col, 1.0);\n}"
     }
   ],
   "animations": [
@@ -62,6 +293,42 @@
       "name": "Press & dim",
       "description": "Shrinks and dims on click.",
       "states": { "clickOn": { "scale": 97, "opacity": 80, "dur": 90, "ease": "ease-out" } }
+    },
+    {
+      "id": "an-glow-hover",
+      "name": "Glow on hover",
+      "description": "Indigo glow blooms on hover.",
+      "states": { "hoverOn": { "effects": [ { "type": "glow", "blur": 20, "spread": 2, "color": "rgba(99,102,241,0.6)", "on": true } ], "dur": 160, "ease": "ease-out" } }
+    },
+    {
+      "id": "an-tint-hover",
+      "name": "Tint on hover",
+      "description": "Fill shifts to indigo on hover.",
+      "states": { "hoverOn": { "fillColor": "#6366F1", "textColor": "#ffffff", "dur": 150, "ease": "ease-out" } }
+    },
+    {
+      "id": "an-raise-hover",
+      "name": "Raise on hover",
+      "description": "Lifts with scale and a drop shadow.",
+      "states": { "hoverOn": { "scale": 103, "effects": [ { "type": "drop", "x": 0, "y": 12, "blur": 26, "spread": -6, "color": "rgba(0,0,0,0.55)", "on": true } ], "dur": 170, "ease": "ease-out" } }
+    },
+    {
+      "id": "an-outline-hover",
+      "name": "Outline on hover",
+      "description": "Border draws in on hover.",
+      "states": { "hoverOn": { "borderWidth": 1, "borderColor": "#818CF8", "dur": 150, "ease": "ease-out" } }
+    },
+    {
+      "id": "an-press-sink",
+      "name": "Press sink",
+      "description": "Firm scale-down on press.",
+      "states": { "clickOn": { "scale": 96, "dur": 100, "ease": "ease-out" } }
+    },
+    {
+      "id": "an-fade-hover",
+      "name": "Fade on hover",
+      "description": "Dims to 70% on hover.",
+      "states": { "hoverOn": { "opacity": 70, "dur": 160, "ease": "ease-out" } }
     }
   ],
   "templates": [
@@ -84,6 +351,92 @@
           }
         ],
         "activePageId": "page_home"
+      }
+    },
+    {
+      "id": "tpl-pricing",
+      "name": "Pricing table",
+      "description": "Three-tier pricing with a highlighted plan.",
+      "canvas": {
+        "pages": [
+          {
+            "id": "page_pricing",
+            "name": "Pricing",
+            "route": "/pricing",
+            "nodes": [
+              { "id": "pr_h", "name": "Title", "kind": "heading", "x": 200, "y": 30, "w": 320, "h": 44, "label": "Pricing that scales", "fontFamily": "Serif display", "fontSize": 32, "fontWeight": "semibold", "textAlign": "center" },
+              { "id": "pr_sub", "name": "Subhead", "kind": "text", "x": 200, "y": 80, "w": 320, "h": 22, "label": "Start free. Upgrade when you grow.", "fontSize": 14, "textColor": "var(--text-secondary)", "textAlign": "center" },
+              { "id": "pr_c1", "name": "Starter card", "kind": "card", "x": 60, "y": 130, "w": 180, "h": 210, "fillColor": "var(--surface-card)", "borderWidth": 1, "borderColor": "var(--border-subtle)", "radius": 12 },
+              { "id": "pr_c2", "name": "Pro card", "kind": "card", "x": 270, "y": 130, "w": 180, "h": 210, "fillColor": "var(--surface-card)", "borderWidth": 1, "borderColor": "#6366F1", "radius": 12 },
+              { "id": "pr_c3", "name": "Team card", "kind": "card", "x": 480, "y": 130, "w": 180, "h": 210, "fillColor": "var(--surface-card)", "borderWidth": 1, "borderColor": "var(--border-subtle)", "radius": 12 },
+              { "id": "pr_n1", "name": "Starter", "kind": "text", "x": 80, "y": 152, "w": 140, "h": 22, "label": "Starter", "fontWeight": "semibold", "fontSize": 15 },
+              { "id": "pr_n2", "name": "Pro", "kind": "text", "x": 290, "y": 152, "w": 140, "h": 22, "label": "Pro", "fontWeight": "semibold", "fontSize": 15 },
+              { "id": "pr_n3", "name": "Team", "kind": "text", "x": 500, "y": 152, "w": 140, "h": 22, "label": "Team", "fontWeight": "semibold", "fontSize": 15 },
+              { "id": "pr_p1", "name": "Price 1", "kind": "heading", "x": 80, "y": 182, "w": 140, "h": 40, "label": "$0", "fontFamily": "Serif display", "fontSize": 30 },
+              { "id": "pr_p2", "name": "Price 2", "kind": "heading", "x": 290, "y": 182, "w": 140, "h": 40, "label": "$24", "fontFamily": "Serif display", "fontSize": 30 },
+              { "id": "pr_p3", "name": "Price 3", "kind": "heading", "x": 500, "y": 182, "w": 140, "h": 40, "label": "$60", "fontFamily": "Serif display", "fontSize": 30 },
+              { "id": "pr_b1", "name": "CTA 1", "kind": "button", "x": 80, "y": 296, "w": 140, "h": 40, "label": "Choose", "variant": "outline", "radius": 8, "borderWidth": 1 },
+              { "id": "pr_b2", "name": "CTA 2", "kind": "button", "x": 290, "y": 296, "w": 140, "h": 40, "label": "Choose Pro", "variant": "solid", "fillColor": "#6366F1", "textColor": "#ffffff", "radius": 8, "fontWeight": "semibold" },
+              { "id": "pr_b3", "name": "CTA 3", "kind": "button", "x": 500, "y": 296, "w": 140, "h": 40, "label": "Choose", "variant": "outline", "radius": 8, "borderWidth": 1 }
+            ],
+            "connections": []
+          }
+        ],
+        "activePageId": "page_pricing"
+      }
+    },
+    {
+      "id": "tpl-auth",
+      "name": "Sign-in form",
+      "description": "Centered auth card with email and password.",
+      "canvas": {
+        "pages": [
+          {
+            "id": "page_auth",
+            "name": "Sign in",
+            "route": "/login",
+            "nodes": [
+              { "id": "au_card", "name": "Card", "kind": "card", "x": 220, "y": 40, "w": 300, "h": 320, "fillColor": "var(--surface-card)", "borderWidth": 1, "borderColor": "var(--border-subtle)", "radius": 14, "effects": [ { "type": "drop", "x": 0, "y": 20, "blur": 48, "spread": -16, "color": "rgba(0,0,0,0.6)", "on": true } ] },
+              { "id": "au_h", "name": "Title", "kind": "heading", "x": 244, "y": 70, "w": 250, "h": 34, "label": "Welcome back", "fontFamily": "Serif display", "fontSize": 26, "fontWeight": "semibold" },
+              { "id": "au_sub", "name": "Subhead", "kind": "text", "x": 244, "y": 108, "w": 250, "h": 20, "label": "Sign in to continue", "fontSize": 13, "textColor": "var(--text-secondary)" },
+              { "id": "au_email", "name": "Email", "kind": "input", "x": 244, "y": 145, "w": 252, "h": 40, "placeholder": "Email", "prefixIcon": "mail", "borderWidth": 1, "radius": 8 },
+              { "id": "au_pw", "name": "Password", "kind": "input", "x": 244, "y": 195, "w": 252, "h": 40, "placeholder": "Password", "prefixIcon": "lock", "inputType": "password", "passwordToggle": true, "borderWidth": 1, "radius": 8 },
+              { "id": "au_btn", "name": "Submit", "kind": "button", "x": 244, "y": 250, "w": 252, "h": 44, "label": "Sign in", "variant": "solid", "fillColor": "#6366F1", "textColor": "#ffffff", "radius": 8, "fontWeight": "semibold" },
+              { "id": "au_link", "name": "Forgot", "kind": "link", "x": 244, "y": 308, "w": 252, "h": 20, "label": "Forgot password?", "textColor": "var(--text-secondary)", "fontSize": 13, "textAlign": "center" }
+            ],
+            "connections": []
+          }
+        ],
+        "activePageId": "page_auth"
+      }
+    },
+    {
+      "id": "tpl-dashboard",
+      "name": "Dashboard overview",
+      "description": "Stat row with area and donut charts.",
+      "canvas": {
+        "pages": [
+          {
+            "id": "page_dash",
+            "name": "Overview",
+            "route": "/dashboard",
+            "nodes": [
+              { "id": "db_h", "name": "Title", "kind": "heading", "x": 40, "y": 28, "w": 300, "h": 34, "label": "Overview", "fontFamily": "Serif display", "fontSize": 26, "fontWeight": "semibold" },
+              { "id": "db_s1c", "name": "Stat card 1", "kind": "card", "x": 40, "y": 78, "w": 190, "h": 96, "fillColor": "var(--surface-card)", "borderWidth": 1, "borderColor": "var(--border-subtle)", "radius": 12 },
+              { "id": "db_s2c", "name": "Stat card 2", "kind": "card", "x": 250, "y": 78, "w": 190, "h": 96, "fillColor": "var(--surface-card)", "borderWidth": 1, "borderColor": "var(--border-subtle)", "radius": 12 },
+              { "id": "db_s3c", "name": "Stat card 3", "kind": "card", "x": 460, "y": 78, "w": 190, "h": 96, "fillColor": "var(--surface-card)", "borderWidth": 1, "borderColor": "var(--border-subtle)", "radius": 12 },
+              { "id": "db_s1", "name": "Revenue", "kind": "stat", "x": 58, "y": 94, "w": 158, "h": 64, "label": "Revenue", "statValue": "$48.2k", "statDelta": "+12%", "statTrend": "up" },
+              { "id": "db_s2", "name": "Users", "kind": "stat", "x": 268, "y": 94, "w": 158, "h": 64, "label": "Active users", "statValue": "2,318", "statDelta": "+4.6%", "statTrend": "up" },
+              { "id": "db_s3", "name": "Churn", "kind": "stat", "x": 478, "y": 94, "w": 158, "h": 64, "label": "Churn", "statValue": "1.2%", "statDelta": "-0.3%", "statTrend": "down" },
+              { "id": "db_chartc", "name": "Chart card", "kind": "card", "x": 40, "y": 194, "w": 400, "h": 170, "fillColor": "var(--surface-card)", "borderWidth": 1, "borderColor": "var(--border-subtle)", "radius": 12 },
+              { "id": "db_chart", "name": "Trend", "kind": "chart", "x": 60, "y": 214, "w": 360, "h": 130, "chartType": "area", "chartData": "12,18,14,26,22,30,28", "chartColor": "#6366F1" },
+              { "id": "db_sidec", "name": "Side card", "kind": "card", "x": 460, "y": 194, "w": 190, "h": 170, "fillColor": "var(--surface-card)", "borderWidth": 1, "borderColor": "var(--border-subtle)", "radius": 12 },
+              { "id": "db_donut", "name": "Split", "kind": "chart", "x": 476, "y": 214, "w": 158, "h": 130, "chartType": "donut", "chartData": "42,28,18,12", "chartLabels": "Design,Eng,PM,Ops" }
+            ],
+            "connections": []
+          }
+        ],
+        "activePageId": "page_dash"
       }
     }
   ],

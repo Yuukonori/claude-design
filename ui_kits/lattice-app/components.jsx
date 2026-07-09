@@ -252,9 +252,16 @@ function AuthShell({ title, subtitle, children, footer }) {
 }
 window.AuthShell = AuthShell;
 
-function Field({ label, error, hint, children, ...rest }) {
+// NOTE: intentionally avoids object-rest (`{ ...rest }`) destructuring. The in-browser Babel
+// transformer emits a top-level `const _excluded` helper for each file that uses object-rest, and
+// those collide across scripts in the shared global scope. The Market previews load the editor's
+// PreviewCanvas.jsx (which uses object-rest), so this file must not add a second one.
+function Field(props) {
   const { Input } = window.LatticeDesignSystem_e801cb;
+  const { label, error, hint, children } = props;
   if (children) return <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>{label && <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-secondary)' }}>{label}</label>}{children}{error && <span style={{ fontSize: 11, color: 'var(--status-danger-fg)' }}>{error}</span>}</div>;
+  const rest = Object.assign({}, props);
+  delete rest.label; delete rest.error; delete rest.hint; delete rest.children;
   return <Input label={label} error={error} hint={hint} {...rest} />;
 }
 window.Field = Field;

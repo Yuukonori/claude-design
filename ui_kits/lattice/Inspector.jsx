@@ -7,11 +7,12 @@ function kindOf(node) {
   return byIcon[node.icon] || 'frame';
 }
 const CONTAINER = new Set(['frame', 'stack', 'grid', 'card', 'section']);
-const NO_TEXT = new Set(['divider', 'image', 'icon', 'avatar', 'switch', 'select', 'list', 'progress', 'chart', 'rect', 'ellipse', 'line', 'triangle', 'star', 'polygon', 'arrow']);
+const NO_TEXT = new Set(['divider', 'image', 'icon', 'avatar', 'switch', 'select', 'list', 'progress', 'chart', 'rect', 'ellipse', 'line', 'triangle', 'star', 'polygon', 'arrow',
+  'textarea', 'radio', 'slider', 'tabs', 'breadcrumb', 'alert', 'table', 'stat']);
 const SHAPE = new Set(['rect', 'ellipse', 'line', 'triangle', 'star', 'polygon', 'arrow']);
 // Kinds that draw a border by default (their own component style) — the Border switch reflects that
 // default as ON, and turning it off actually removes the field's border.
-const BORDER_INTRINSIC = new Set(['input']);
+const BORDER_INTRINSIC = new Set(['input', 'textarea']);
 window.kindOf = kindOf;
 
 function Inspector({ node, onChange, onBaseChange, onRename, connections, onDelete, onDetach, onDuplicate, allNodes = [], onSetParent, responsive = true, palette = [], pages = [], workflows = [], variables = [], pageVars = [], editingState = 'default', onSetEditingState, singleSelected = true, onResetState, editingFrame = null, onSetEditingFrame, onAddCustomState, onUpdateCustomState, onDeleteCustomState, onAddFrame, onUpdateFrame, onDeleteFrame, frameEditing = false, onOpenAnimEditor, onSaveAsComponent, onEditShader, shaderPresets, width }) {
@@ -311,6 +312,104 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <Input label="Placeholder" size="sm" value={node.placeholder || ''} placeholder="Select…" onChange={e => set('placeholder')(e.target.value)} />
               <Input label="Options (comma-separated)" size="sm" value={node.optionsText || ''} placeholder="One, Two, Three" onChange={e => set('optionsText')(e.target.value)} />
+            </div>
+          </Section>
+        )}
+
+        {kind === 'textarea' && (
+          <Section title="Textarea">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <Input label="Placeholder" size="sm" placeholder="Write a message…" value={node.placeholder || ''} onChange={e => set('placeholder')(e.target.value)} />
+              <Input label="Default value" size="sm" placeholder="Prefilled text" value={node.inputValue || ''} onChange={e => set('inputValue')(e.target.value)} />
+              <Input label="Field label" size="sm" placeholder="(none)" value={node.fieldLabel || ''} onChange={e => set('fieldLabel')(e.target.value)} />
+              <Input label="Helper text" size="sm" placeholder="(none)" value={node.helperText || ''} onChange={e => set('helperText')(e.target.value)} />
+              <NumRow label="Rows" value={node.rows ?? 3} min={1} onChange={v => set('rows')(Math.max(1, +v || 1))} />
+              <Select label="Size" size="sm" options={['sm', 'md', 'lg']} value={node.inputSize || 'md'} onChange={e => set('inputSize')(e.target.value)} />
+              <Switch label="Disabled"  checked={!!node.disabled} onChange={set('disabled')} />
+              <Switch label="Read only" checked={!!node.readOnly} onChange={set('readOnly')} />
+            </div>
+          </Section>
+        )}
+
+        {kind === 'radio' && (
+          <Section title="Radio group">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <Input label="Options (comma-separated)" size="sm" value={node.optionsText || ''} placeholder="One, Two, Three" onChange={e => set('optionsText')(e.target.value)} />
+              <Switch label="Allow multiple" checked={!!node.radioMulti}
+                onChange={on => onChange(node.id, { radioMulti: on, ...(on && !node.selectedMulti ? { selectedMulti: String(node.selected ?? 0) } : {}) })} />
+              {node.radioMulti
+                ? <Input label="Selected # (comma-sep)" size="sm" value={node.selectedMulti || ''} placeholder="0, 2" onChange={e => set('selectedMulti')(e.target.value)} />
+                : <NumRow label="Selected #" value={node.selected ?? 0} min={0} onChange={v => set('selected')(Math.max(0, Math.round(+v || 0)))} />}
+              <Select label="Direction" size="sm" options={[{ value: 'vertical', label: 'Vertical' }, { value: 'horizontal', label: 'Horizontal' }]}
+                value={node.radioDir || 'vertical'} onChange={e => set('radioDir')(e.target.value)} />
+            </div>
+          </Section>
+        )}
+
+        {kind === 'slider' && (
+          <Section title="Slider">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <NumRow label="Min"   value={node.min ?? 0}   min={-99999} onChange={v => set('min')(+v || 0)} />
+              <NumRow label="Max"   value={node.max ?? 100} min={-99999} onChange={v => set('max')(+v || 0)} />
+              <NumRow label="Value" value={node.value ?? 50} min={-99999} onChange={v => set('value')(+v || 0)} />
+              <NumRow label="Step"  value={node.step ?? 1}  min={0} step={0.1} onChange={v => set('step')(Math.max(0, +v || 0))} />
+              <Switch label="Show value" checked={!!node.showValue} onChange={set('showValue')} />
+            </div>
+          </Section>
+        )}
+
+        {kind === 'tabs' && (
+          <Section title="Tabs">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <Input label="Tabs (comma-separated)" size="sm" value={node.tabsText || ''} placeholder="Overview, Activity, Settings" onChange={e => set('tabsText')(e.target.value)} />
+              <NumRow label="Active tab #" value={node.activeTab ?? 0} min={0} onChange={v => set('activeTab')(Math.max(0, Math.round(+v || 0)))} />
+            </div>
+          </Section>
+        )}
+
+        {kind === 'breadcrumb' && (
+          <Section title="Breadcrumb">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <Input label="Items (comma-separated)" size="sm" value={node.itemsText || ''} placeholder="Home, Projects, Lattice" onChange={e => set('itemsText')(e.target.value)} />
+              <Input label="Separator" size="sm" value={node.separator || ''} placeholder="/" onChange={e => set('separator')(e.target.value)} />
+            </div>
+          </Section>
+        )}
+
+        {kind === 'alert' && (
+          <Section title="Alert">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <Select label="Tone" size="sm" options={['info', 'success', 'warning', 'danger', 'neutral']} value={node.tone || 'info'} onChange={e => set('tone')(e.target.value)} />
+              <Input label="Title" size="sm" placeholder="Heads up!" value={node.label || ''} onChange={e => onChange(node.id, { label: e.target.value })} />
+              <Input label="Message" size="sm" placeholder="Message body" value={node.alertText || ''} onChange={e => set('alertText')(e.target.value)} />
+              <div><div style={fieldCap}>Icon</div><IconPicker value={node.alertIcon} onChange={set('alertIcon')} placeholder="No icon" /></div>
+              <CRow label="Text color" value={node.textColor} onChange={set('textColor')} palette={palette} />
+            </div>
+          </Section>
+        )}
+
+        {kind === 'table' && (
+          <Section title="Table">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <Input label="Columns (comma-separated)" size="sm" value={node.tableCols || ''} placeholder="Name, Role, Status" onChange={e => set('tableCols')(e.target.value)} />
+              <div><div style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-secondary)', marginBottom: 6 }}>Rows (one per line, cells comma-separated)</div>
+                <textarea value={node.tableRows || ''} title="Table rows" placeholder={'Rin, Design, Active\nLee, Eng, Away'} onChange={e => set('tableRows')(e.target.value)}
+                  style={{ width: '100%', minHeight: 72, boxSizing: 'border-box', padding: 8, border: '1px solid var(--border-default)', background: 'var(--surface-inset)', color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', fontSize: 12, outline: 'none', resize: 'vertical' }} /></div>
+              <Switch label="Striped rows" checked={!!node.striped} onChange={set('striped')} />
+              <CRow label="Text color" value={node.textColor} onChange={set('textColor')} palette={palette} />
+            </div>
+          </Section>
+        )}
+
+        {kind === 'stat' && (
+          <Section title="Stat">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <Input label="Label" size="sm" placeholder="Revenue" value={node.label || ''} onChange={e => onChange(node.id, { label: e.target.value })} />
+              <Input label="Value" size="sm" placeholder="$48.2k" value={node.statValue || ''} onChange={e => set('statValue')(e.target.value)} />
+              <Input label="Delta" size="sm" placeholder="+12.5%" value={node.statDelta || ''} onChange={e => set('statDelta')(e.target.value)} />
+              <Select label="Trend" size="sm" options={[{ value: 'up', label: 'Up (green)' }, { value: 'down', label: 'Down (red)' }, { value: 'none', label: 'None' }]}
+                value={node.statTrend || 'up'} onChange={e => set('statTrend')(e.target.value)} />
+              <CRow label="Text color" value={node.textColor} onChange={set('textColor')} palette={palette} />
             </div>
           </Section>
         )}

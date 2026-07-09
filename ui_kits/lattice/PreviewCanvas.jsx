@@ -340,6 +340,153 @@ function pvRender(node) {
       </div>
     );
   }
+  if (kind === 'textarea') {
+    const sz = INPUT_SIZE[node.inputSize] || INPUT_SIZE.md;
+    const bd = node.borderWidth === 0 ? 'none'
+      : node.borderWidth > 0 ? `${node.borderWidth}px ${node.borderStyle || 'solid'} ${node.borderColor || 'var(--border-default)'}`
+      : '1px solid var(--border-default)';
+    const radius = (window.nodeFx && (window.nodeFx(node) || {}).borderRadius) || undefined;
+    const area = (
+      <textarea data-lt-input placeholder={node.placeholder || 'Write a message…'} defaultValue={node.inputValue || ''}
+        disabled={!!node.disabled} readOnly={!!node.readOnly} rows={node.rows || 3}
+        style={{ width: '100%', flex: 1, minHeight: 0, resize: 'none', boxSizing: 'border-box', border: bd, borderRadius: radius,
+          background: fill || 'var(--surface-inset)', color: node.textColor || 'var(--text-primary)',
+          fontFamily: FONT[node.fontFamily] || 'var(--font-sans)', fontSize: node.fontSize || sz.fs, lineHeight: node.lineHeight ?? 1.5,
+          fontWeight: WEIGHT[node.fontWeight] || 400, letterSpacing: (node.letterSpacing ?? 0) + 'px',
+          textTransform: node.textTransform && node.textTransform !== 'none' ? node.textTransform : undefined,
+          padding: `${sz.px}px`, outline: 'none', opacity: node.disabled ? 0.5 : 1, ...tfx }} />
+    );
+    if (!node.fieldLabel && !node.helperText) return <div style={{ width: '100%', height: '100%', display: 'flex' }}>{area}</div>;
+    return (
+      <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column', gap: 4, boxSizing: 'border-box' }}>
+        {node.fieldLabel && <span style={{ fontSize: 12, fontWeight: 500, color: node.textColor || 'var(--text-secondary)', fontFamily: FONT[node.fontFamily] || 'var(--font-sans)', flex: 'none' }}>{node.fieldLabel}</span>}
+        {area}
+        {node.helperText && <span style={{ fontSize: 11.5, color: 'var(--text-muted)', flex: 'none' }}>{node.helperText}</span>}
+      </div>
+    );
+  }
+  if (kind === 'radio') {
+    const opts = String(node.optionsText || '').split(',').map(s => s.trim()).filter(Boolean);
+    const horiz = node.radioDir === 'horizontal';
+    const multi = !!node.radioMulti;
+    // Multi mode selects a list of indices; single mode selects one (classic radio semantics).
+    const selSet = multi
+      ? new Set(String(node.selectedMulti || '').split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n)))
+      : new Set([node.selected ?? 0]);
+    const dot = fill || 'var(--action-solid)';
+    return (
+      <div style={{ ...box, display: 'flex', flexDirection: horiz ? 'row' : 'column', flexWrap: 'wrap', alignContent: 'center',
+        gap: horiz ? 16 : 10, justifyContent: justifyFor(node.textAlign, 'left'), color: node.textColor || 'var(--text-secondary)',
+        fontFamily: FONT[node.fontFamily] || 'var(--font-sans)', fontSize: node.fontSize || 14, fontWeight: WEIGHT[node.fontWeight] || 400,
+        letterSpacing: (node.letterSpacing ?? 0) + 'px', textTransform: node.textTransform && node.textTransform !== 'none' ? node.textTransform : undefined, ...tfx }}>
+        {opts.map((o, i) => {
+          const on = selSet.has(i);
+          return (
+            <label key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ width: 16, height: 16, flex: 'none', boxSizing: 'border-box', borderRadius: multi ? 5 : '50%',
+                border: `2px solid ${on ? dot : 'var(--border-strong)'}`, background: multi && on ? dot : 'transparent',
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
+                {on && (multi
+                  ? <LIcon name="check" size={11} color="var(--action-solid-text)" />
+                  : <span style={{ width: 7, height: 7, borderRadius: '50%', background: dot }} />)}
+              </span>
+              {o}
+            </label>
+          );
+        })}
+      </div>
+    );
+  }
+  if (kind === 'slider') {
+    const min = node.min ?? 0, max = node.max ?? 100;
+    const val = Math.max(min, Math.min(max, node.value ?? 50));
+    const pct = max > min ? ((val - min) / (max - min)) * 100 : 0;
+    return (
+      <div style={{ ...box, display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div style={{ position: 'relative', flex: 1, height: 6, background: 'var(--surface-hover)', borderRadius: 999 }}>
+          <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', width: pct + '%', background: fill || 'var(--action-solid)', borderRadius: 999 }} />
+          <div style={{ position: 'absolute', top: '50%', left: pct + '%', transform: 'translate(-50%,-50%)', width: 16, height: 16, borderRadius: '50%', background: 'var(--text-primary)', border: '2px solid var(--surface)', boxShadow: '0 1px 3px rgba(0,0,0,0.4)' }} />
+        </div>
+        {node.showValue && <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: node.textColor || 'var(--text-muted)', minWidth: 28, textAlign: 'right', flex: 'none' }}>{Math.round(val)}</span>}
+      </div>
+    );
+  }
+  if (kind === 'tabs') {
+    const items = String(node.tabsText || '').split(',').map(s => s.trim()).filter(Boolean);
+    const idx = Math.max(0, Math.min(items.length - 1, node.activeTab ?? 0));
+    return (
+      <div style={{ ...box, display: 'flex', alignItems: node.h > 60 ? 'flex-start' : 'center', ...tfx }}>
+        {items.length ? <DS.Tabs tabs={items} value={items[idx]} style={{ width: '100%' }} /> : null}
+      </div>
+    );
+  }
+  if (kind === 'breadcrumb') {
+    const items = String(node.itemsText || '').split(',').map(s => s.trim()).filter(Boolean);
+    const sep = node.separator || '/';
+    return (
+      <div style={{ ...box, display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 7, color: node.textColor || 'var(--text-muted)',
+        fontFamily: FONT[node.fontFamily] || 'var(--font-sans)', fontSize: node.fontSize || 13, fontWeight: WEIGHT[node.fontWeight] || 400,
+        letterSpacing: (node.letterSpacing ?? 0) + 'px', textTransform: node.textTransform && node.textTransform !== 'none' ? node.textTransform : undefined,
+        justifyContent: justifyFor(node.textAlign, 'left'), ...tfx }}>
+        {items.map((it, i) => (
+          <React.Fragment key={i}>
+            <span style={{ color: i === items.length - 1 ? (node.textColor || 'var(--text-primary)') : 'inherit', fontWeight: i === items.length - 1 ? 500 : 400 }}>{it}</span>
+            {i < items.length - 1 && <span style={{ opacity: 0.55 }}>{sep}</span>}
+          </React.Fragment>
+        ))}
+      </div>
+    );
+  }
+  if (kind === 'alert') {
+    const TONES = { info: 'var(--blue-base)', success: 'var(--green-base)', warning: 'var(--amber-base)', danger: 'var(--status-danger-fg)', neutral: 'var(--text-secondary)' };
+    const c = TONES[node.tone || 'info'] || TONES.info;
+    const fs = node.fontSize || 13.5;
+    return (
+      <div style={{ ...box, display: 'flex', gap: 10, padding: '12px 14px', background: fill || 'var(--surface-card)', borderLeft: `3px solid ${c}`,
+        fontFamily: FONT[node.fontFamily] || 'var(--font-sans)', ...tfx }}>
+        {node.alertIcon && <LIcon name={node.alertIcon} size={18} color={c} />}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+          {node.label && <span style={{ fontWeight: 600, color: node.textColor || 'var(--text-primary)', fontSize: fs }}>{node.label}</span>}
+          {node.alertText && <span style={{ fontSize: fs - 1, color: node.textColor || 'var(--text-muted)', lineHeight: 1.5 }}>{node.alertText}</span>}
+        </div>
+      </div>
+    );
+  }
+  if (kind === 'table') {
+    const cols = String(node.tableCols || '').split(',').map(s => s.trim()).filter(Boolean);
+    const rows = String(node.tableRows || '').split('\n').map(r => r.split(',').map(c => c.trim())).filter(r => r.some(Boolean));
+    const fs = node.fontSize || 12.5;
+    return (
+      <div style={{ ...box, overflow: 'auto', fontFamily: FONT[node.fontFamily] || 'var(--font-sans)', background: fill || 'transparent', ...tfx }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: fs, color: node.textColor || 'var(--text-secondary)' }}>
+          {cols.length > 0 && (
+            <thead><tr>{cols.map((c, i) => <th key={i} style={{ textAlign: 'left', padding: '7px 10px', borderBottom: '1px solid var(--border-default)', color: node.textColor || 'var(--text-primary)', fontWeight: 600, whiteSpace: 'nowrap' }}>{c}</th>)}</tr></thead>
+          )}
+          <tbody>{rows.map((r, ri) => (
+            <tr key={ri} style={{ background: node.striped && ri % 2 ? 'var(--surface-inset)' : 'transparent' }}>
+              {r.map((cell, ci) => <td key={ci} style={{ padding: '7px 10px', borderBottom: '1px solid var(--border-subtle)', whiteSpace: 'nowrap' }}>{cell}</td>)}
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>
+    );
+  }
+  if (kind === 'stat') {
+    const trend = node.statTrend || 'up';
+    const tc = trend === 'up' ? 'var(--green-base)' : trend === 'down' ? 'var(--status-danger-fg)' : 'var(--text-muted)';
+    return (
+      <div style={{ ...box, display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 3, padding: '4px 2px', background: fill || 'transparent', fontFamily: FONT[node.fontFamily] || 'var(--font-sans)', ...tfx }}>
+        {node.label && <span style={{ fontSize: 12, color: node.textColor || 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{node.label}</span>}
+        <span style={{ fontSize: node.fontSize || 26, fontWeight: 600, color: node.textColor || 'var(--text-primary)', fontFamily: FONT[node.fontFamily] || 'var(--font-serif-display)', lineHeight: 1.1 }}>{node.statValue || '—'}</span>
+        {node.statDelta && (
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 12, color: tc }}>
+            {trend !== 'none' && <LIcon name={trend === 'up' ? 'trending-up' : 'trending-down'} size={13} color={tc} />}
+            {node.statDelta}
+          </span>
+        )}
+      </div>
+    );
+  }
   // container (frame / stack / grid / card / section) — no built-in border; it comes from the
   // Border setting via nodeFx (so Preview matches the editor, which draws containers borderless).
   // A shader fill sits behind the content, so keep the container transparent to let it show through.
@@ -354,8 +501,8 @@ function PreviewNode({ node }) {
   if (SHAPE_KINDS.has(pvKind(node))) return renderShape(node); // shapes own their full styling
   const inner = pvRender(node);
   let fx = window.nodeFx ? window.nodeFx(node) : null;
-  // Inputs draw their own border (see above) — drop the duplicate wrapper border for them.
-  if (fx && fx.border && pvKind(node) === 'input') { const { border, ...rest } = fx; fx = Object.keys(rest).length ? rest : null; }
+  // Inputs & textareas draw their own border (see above) — drop the duplicate wrapper border.
+  if (fx && fx.border && (pvKind(node) === 'input' || pvKind(node) === 'textarea')) { const { border, ...rest } = fx; fx = Object.keys(rest).length ? rest : null; }
   // Shader fill: an animated WebGL texture behind the node's content, clipped to its radius.
   if (node.shader && node.shader.on && window.ShaderFill) {
     const radius = fx && fx.borderRadius;
@@ -384,6 +531,24 @@ function PreviewCanvas({ nodes, connections, artboard, device, onAction, runtime
   const [toggled, setToggled] = React.useState({}); // nodeId -> bool (clickMode 'toggle')
   const rootRef = React.useRef(null);
   const childIds = new Set(connections.filter(c => c.kind === 'child').map(c => c.from));
+
+  // --- Zoom & pan — Preview is a pannable/zoomable surface (wheel to zoom; middle-drag or
+  // Space-drag to pan), so the prototype's own clicks/hovers keep working untouched.
+  const viewportRef = React.useRef(null);
+  const [view, setView] = React.useState({ x: 0, y: 0, z: 1 });
+  const viewT = React.useRef(view);
+  const setV = (upd) => setView(v => { const nv = typeof upd === 'function' ? upd(v) : upd; viewT.current = nv; return nv; });
+  const panRef = React.useRef(null);
+  const spaceRef = React.useRef(false);
+  const [spaceHeld, setSpaceHeld] = React.useState(false);
+  const [panning, setPanning] = React.useState(false);
+  // Zoom keeping the given viewport point fixed (cursor for wheel, centre for buttons).
+  const zoomAt = (nz, px, py) => {
+    const cur = viewT.current;
+    const z = Math.min(4, Math.max(0.1, nz));
+    const k = z / cur.z;
+    setV({ x: px - (px - cur.x) * k, y: py - (py - cur.y) * k, z });
+  };
 
   // First enabled keyframe-animation custom state on a node (auto-plays in Preview).
   const animState = (n) => (n.customStates || []).find(c => c.type === 'anim' && (c.frames || []).length >= 1 && (!window.stateEnabled || window.stateEnabled(n, c.id)));
@@ -422,7 +587,11 @@ function PreviewCanvas({ nodes, connections, artboard, device, onAction, runtime
   const dispatch = (action) => {
     if (!action) return;
     if (action.type === 'toggle') { setOverride(o => ({ ...o, [action.target]: !o[action.target] })); return; }
-    if (action.type === 'scroll') { const el = rootRef.current && rootRef.current.querySelector('[data-nid="' + action.target + '"]'); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); return; }
+    if (action.type === 'scroll') {
+      const n = nodes.find(x => x.id === action.target); const el = viewportRef.current;
+      if (n && el) { const r = el.getBoundingClientRect(); const z = viewT.current.z; setV(v => ({ ...v, x: r.width / 2 - (n.x + n.w / 2) * z, y: r.height / 2 - (n.y + n.h / 2) * z })); }
+      return;
+    }
     onAction && onAction(action);
   };
   const run = (node, trigger) => (e) => {
@@ -444,17 +613,67 @@ function PreviewCanvas({ nodes, connections, artboard, device, onAction, runtime
     return `[data-nid="${n.id}"],[data-nid="${n.id}"] *{transition:all ${dur}ms ${ease}}`;
   }).join('\n');
 
+  // Fit the artboard, centred, whenever its size changes (mount + device switch).
+  const fitView = React.useCallback(() => {
+    const el = viewportRef.current; if (!el) return;
+    const r = el.getBoundingClientRect(); if (!r.width || !r.height) return;
+    const z = Math.max(0.1, Math.min(2, Math.min((r.width - 48) / W, (r.height - 48) / H)));
+    setV({ x: Math.round((r.width - W * z) / 2), y: Math.round((r.height - H * z) / 2), z });
+  }, [W, H]);
+  React.useEffect(() => { fitView(); }, [fitView]);
+
+  // Wheel to zoom toward the cursor.
+  React.useEffect(() => {
+    const el = viewportRef.current; if (!el) return;
+    const onWheel = (e) => {
+      e.preventDefault();
+      const r = el.getBoundingClientRect();
+      zoomAt(viewT.current.z * (e.deltaY < 0 ? 1.1 : 1 / 1.1), e.clientX - r.left, e.clientY - r.top);
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
+
+  // Hold Space to pan (ignored while typing in a field).
+  React.useEffect(() => {
+    const typing = (t) => /^(INPUT|TEXTAREA|SELECT)$/.test((t && t.tagName) || '') || (t && t.isContentEditable);
+    const kd = (e) => { if (e.code === 'Space' && !e.repeat && !typing(e.target)) { e.preventDefault(); spaceRef.current = true; setSpaceHeld(true); } };
+    const ku = (e) => { if (e.code === 'Space') { spaceRef.current = false; setSpaceHeld(false); } };
+    document.addEventListener('keydown', kd);
+    document.addEventListener('keyup', ku);
+    return () => { document.removeEventListener('keydown', kd); document.removeEventListener('keyup', ku); };
+  }, []);
+
+  // Document-level pan drag (started by middle-button or Space+left on the viewport).
+  React.useEffect(() => {
+    const onMove = (e) => { const p = panRef.current; if (!p) return; setV(v => ({ ...v, x: p.ox + (e.clientX - p.sx), y: p.oy + (e.clientY - p.sy) })); };
+    const onUp = () => { if (panRef.current) { panRef.current = null; setPanning(false); } };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    return () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
+  }, []);
+
+  const startPan = (e) => { panRef.current = { sx: e.clientX, sy: e.clientY, ox: viewT.current.x, oy: viewT.current.y }; setPanning(true); e.preventDefault(); };
+  const zoomButton = (mult) => { const el = viewportRef.current; const r = el && el.getBoundingClientRect(); zoomAt(viewT.current.z * mult, r ? r.width / 2 : 0, r ? r.height / 2 : 0); };
+  const reset100 = () => { const el = viewportRef.current; const r = el && el.getBoundingClientRect(); zoomAt(1, r ? r.width / 2 : 0, r ? r.height / 2 : 0); };
+
   return (
     <window.WorkflowRuntime.Provider value={runtime}>
-    <div ref={rootRef} style={{ flex: 1, minWidth: 0, overflow: 'auto', background: 'var(--bg-app)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: 32 }}>
+    <div ref={viewportRef}
+      style={{ flex: 1, minWidth: 0, overflow: 'hidden', position: 'relative', background: 'var(--bg-app)',
+        cursor: panning ? 'grabbing' : spaceHeld ? 'grab' : 'default' }}
+      onMouseDown={e => { if (e.button === 1 || (e.button === 0 && spaceRef.current)) startPan(e); }}>
       <style>{KEYFRAMES + '\n' + stateCSS}</style>
       {visible.length === 0 ? (
-        <div style={{ margin: 'auto', textAlign: 'center', color: 'var(--text-muted)' }}>
-          <div style={{ fontFamily: 'var(--font-serif-display)', fontSize: 22, color: 'var(--text-secondary)', marginBottom: 6 }}>Nothing to preview</div>
-          <div style={{ fontSize: 13 }}>Place components on the canvas, then switch back to preview.</div>
+        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center', color: 'var(--text-muted)' }}>
+          <div>
+            <div style={{ fontFamily: 'var(--font-serif-display)', fontSize: 22, color: 'var(--text-secondary)', marginBottom: 6 }}>Nothing to preview</div>
+            <div style={{ fontSize: 13 }}>Place components on the canvas, then switch back to preview.</div>
+          </div>
         </div>
       ) : (
-        <div style={{ position: 'relative', flex: 'none', width: W, height: H, background: 'var(--surface)', border: '1px solid var(--border-subtle)', boxShadow: 'var(--shadow-md)', overflow: 'hidden' }}>
+        <div ref={rootRef} style={{ position: 'absolute', left: 0, top: 0, transformOrigin: '0 0', transform: `translate(${view.x}px,${view.y}px) scale(${view.z})` }}>
+        <div style={{ position: 'relative', width: W, height: H, background: 'var(--surface)', border: '1px solid var(--border-subtle)', boxShadow: 'var(--shadow-md)', overflow: 'hidden' }}>
           {visible.map(n => {
             const a = n.anim;
             // `backwards` (not `both`): apply the first keyframe during the delay so there's no
@@ -483,9 +702,42 @@ function PreviewCanvas({ nodes, connections, artboard, device, onAction, runtime
             );
           })}
         </div>
+        </div>
+      )}
+
+      {/* Zoom controls — mirror the design canvas so Preview is navigable too */}
+      {visible.length > 0 && (
+        <div style={{
+          position: 'absolute', bottom: 14, left: 14, display: 'flex',
+          background: '#1a1f2e', border: '1px solid rgba(255,255,255,0.1)',
+          borderRadius: 6, overflow: 'hidden', userSelect: 'none',
+          boxShadow: '0 4px 16px rgba(0,0,0,0.4)', zIndex: 30,
+        }}>
+          <button type="button" title="Zoom out" onClick={() => zoomButton(1 / 1.2)} style={pvZBtn}>
+            <i data-lucide="minus" style={{ width: 13, height: 13 }}></i>
+          </button>
+          <button type="button" title="Reset to 100%" onClick={reset100}
+            style={{ ...pvZBtn, width: 54, fontSize: 11, fontFamily: 'var(--font-mono)', borderLeft: '1px solid rgba(255,255,255,0.08)', borderRight: '1px solid rgba(255,255,255,0.08)' }}>
+            {Math.round(view.z * 100)}%
+          </button>
+          <button type="button" title="Zoom in" onClick={() => zoomButton(1.2)} style={pvZBtn}>
+            <i data-lucide="plus" style={{ width: 13, height: 13 }}></i>
+          </button>
+          <button type="button" title="Fit to screen" onClick={fitView} style={{ ...pvZBtn, borderLeft: '1px solid rgba(255,255,255,0.08)' }}>
+            <i data-lucide="maximize" style={{ width: 13, height: 13 }}></i>
+          </button>
+        </div>
       )}
     </div>
     </window.WorkflowRuntime.Provider>
   );
 }
+
+const pvZBtn = {
+  width: 32, height: 30, border: 0, background: 'transparent',
+  color: 'rgba(255,255,255,0.55)', cursor: 'pointer',
+  display: 'flex', alignItems: 'center', justifyContent: 'center',
+  transition: 'color 120ms',
+};
+
 window.PreviewCanvas = PreviewCanvas;

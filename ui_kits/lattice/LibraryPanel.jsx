@@ -23,12 +23,24 @@ function LibraryPanel({ onPlace, customComponents = [], onDeleteCustom, libraryC
     { group: 'Forms', items: [
       { name: 'Button', icon: 'square', kind: 'button' },
       { name: 'Input', icon: 'text-cursor-input', kind: 'input' },
+      { name: 'Textarea', icon: 'text-quote', kind: 'textarea' },
       { name: 'Select', icon: 'chevrons-up-down', kind: 'select' },
+      { name: 'Radio', icon: 'circle-dot', kind: 'radio' },
       { name: 'Switch', icon: 'toggle-right', kind: 'switch' },
       { name: 'Checkbox', icon: 'square-check', kind: 'checkbox' },
+      { name: 'Slider', icon: 'sliders-horizontal', kind: 'slider' },
+    ] },
+    { group: 'Navigation', items: [
+      { name: 'Tabs', icon: 'panels-top-left', kind: 'tabs' },
+      { name: 'Breadcrumb', icon: 'chevron-right', kind: 'breadcrumb' },
+    ] },
+    { group: 'Feedback', items: [
+      { name: 'Alert', icon: 'triangle-alert', kind: 'alert' },
     ] },
     { group: 'Data', items: [
       { name: 'List', icon: 'list', kind: 'list' },
+      { name: 'Table', icon: 'table', kind: 'table' },
+      { name: 'Stat', icon: 'trending-up', kind: 'stat' },
       { name: 'Progress', icon: 'loader', kind: 'progress' },
       { name: 'Chart', icon: 'chart-column', kind: 'chart' },
     ] },
