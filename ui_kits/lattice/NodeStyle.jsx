@@ -193,8 +193,14 @@ function textGradientFx(node) {
 // A state is a partial node holding only overridden props, plus reserved `dur`/`ease` transition
 // timing that must not leak into the rendered node. `mergeState` yields the node as it looks in a
 // given state; `default`/missing states return the node unchanged.
-const STATE_KEYS = ['hoverOn', 'hoverOff', 'clickOn'];
-const STATE_META = { dur: 1, ease: 1, off: 1 }; // reserved keys, never merged into the rendered node
+// Built-in interaction triggers a node can react to. Each `node.states[key]` is a binding that holds
+// either a STATIC override map (merged when active) or an ANIMATION pointer (`animId` → a
+// `node.customStates` entry). Order here drives the Inspector's state dropdown.
+const STATE_KEYS = ['hoverOn', 'hoverOff', 'press', 'hold', 'click', 'rightClick', 'drag', 'drop'];
+const STATE_LABELS = { default: 'Default', hoverOn: 'Hover On', hoverOff: 'Hover Off', press: 'Press', hold: 'Hold', click: 'Left click', rightClick: 'Right click', drag: 'Drag', drop: 'Drop' };
+// Reserved keys on a binding — never merged into the rendered node. `animId`/`preset` bind an
+// animation + record its source preset; `holdMs`/`sustain` shape the Hold trigger.
+const STATE_META = { dur: 1, ease: 1, off: 1, animId: 1, preset: 1, holdMs: 1, sustain: 1 };
 
 function stripMeta(o) {
   if (!o) return null;
@@ -250,15 +256,78 @@ function stateTiming(node, stateKey) {
   return { dur: (s && s.dur != null) ? s.dur : 150, ease: (s && s.ease) || 'ease-out' };
 }
 
-// Does a state carry any real (non-timing) override? Drives the "has content" dot in the switch.
+// Does a state carry any real content — a non-timing override OR an assigned animation? Drives the
+// "has content" dot in the state dropdown.
 function stateHasOverrides(node, stateKey) {
+  const s = node && node.states && node.states[stateKey];
+  if (s && s.animId) return true;
   const ov = stateOverrides(node, stateKey);
   return !!(ov && Object.keys(ov).length);
+}
+
+// The animation bound to a trigger (animation mode), or null (static mode).
+function stateAnimId(node, stateKey) {
+  const s = node && node.states && node.states[stateKey];
+  return (s && s.animId) || null;
 }
 
 // A state is enabled unless explicitly turned off. Preview ignores disabled states.
 function stateEnabled(node, stateKey) {
   return !(node && node.states && node.states[stateKey] && node.states[stateKey].off);
+}
+
+// --- Colour shading + one-click state presets --------------------------------------------------
+// Tint (amt>0 → toward white) or shade (amt<0 → toward black) any CSS colour by |amt| (0..1). Uses
+// color-mix so hex, rgb(), named and `var(--token)` colours all shade live in the browser.
+function shadeColor(css, amt) {
+  if (!css) return null;
+  // Concrete colours → compute a real rgb() so track interpolation stays smooth; tokens/var() fall
+  // back to color-mix (which the browser resolves live, but steps rather than tweens).
+  const rgb = window.parseRGB && window.parseRGB(css);
+  if (rgb) {
+    const target = amt < 0 ? 0 : 255, k = Math.min(1, Math.abs(amt));
+    const ch = (c) => Math.round(c + (target - c) * k);
+    return `rgb(${ch(rgb.r)}, ${ch(rgb.g)}, ${ch(rgb.b)})`;
+  }
+  const p = Math.round(Math.min(1, Math.abs(amt)) * 100);
+  return `color-mix(in srgb, ${css} ${100 - p}%, ${amt < 0 ? 'black' : 'white'})`;
+}
+
+// Build a tracks array from [prop, [[t,value,ease],…]] tuples, skipping any with no key list.
+function buildTracks(rows) {
+  return rows.filter(r => r && r[1]).map(([prop, keys]) => ({ prop, keys: keys.map(([t, value, ease]) => ({ t, value, ease: ease || 'ease-out' })) }));
+}
+// A two-key colour track that darkens the node's fill over `dur` ms (null when it has no fill).
+function darkTrack(node, dur) {
+  const f = node && node.fillColor;
+  return f ? [[0, f, 'ease-out'], [dur, shadeColor(f, -0.16), 'ease-out']] : null;
+}
+// Preset definitions. Each returns { kind:'static', ov, dur, ease } or
+// { kind:'anim', name, loop, sustain, duration, tracks }.
+const STATE_PRESETS = {
+  hoverOn: (n) => ({ kind: 'static', dur: 120, ease: 'ease-out', ov: withMaybeFill({ scale: 102 }, shadeColor(n.fillColor, 0.14)) }),
+  hoverOff: () => ({ kind: 'static', dur: 150, ease: 'ease-out', ov: {} }), // clears back to default
+  press: (n) => ({ kind: 'anim', name: 'Press', loop: false, duration: 220,
+    tracks: buildTracks([['scale', [[0, 100, 'ease-out'], [90, 94, 'ease-out'], [220, 100, 'ease-out']]], ['fillColor', darkTrack(n, 220)]]) }),
+  hold: (n) => ({ kind: 'anim', name: 'Hold', loop: false, sustain: true, duration: 180,
+    tracks: buildTracks([['scale', [[0, 100, 'ease-out'], [180, 96, 'ease-out']]], ['fillColor', darkTrack(n, 180)]]) }),
+  click: (n) => STATE_PRESETS.press(n),
+  rightClick: (n) => STATE_PRESETS.press(n),
+  drag: () => ({ kind: 'static', dur: 120, ease: 'ease-out', ov: { scale: 104, opacity: 92 } }),
+  drop: () => ({ kind: 'anim', name: 'Drop', loop: false, duration: 260,
+    tracks: buildTracks([['scale', [[0, 104, 'ease-out'], [120, 97, 'ease-in-out'], [260, 100, 'ease-out']]]]) }),
+};
+function withMaybeFill(ov, fill) { return fill ? { ...ov, fillColor: fill } : ov; }
+
+// Resolve a trigger's preset into a normalized descriptor for the App to apply:
+//   { kind:'static', states:{…ov, dur, ease, preset} }  — write straight into node.states[trigger]
+//   { kind:'anim', state:{name,type:'anim',…,tracks}, preset } — create a customState + bind animId
+function applyStatePreset(node, trigger) {
+  const make = STATE_PRESETS[trigger];
+  if (!make) return null;
+  const p = make(node);
+  if (p.kind === 'static') return { kind: 'static', states: { ...p.ov, dur: p.dur, ease: p.ease, preset: trigger, off: false } };
+  return { kind: 'anim', preset: trigger, state: { name: p.name, type: 'anim', loop: !!p.loop, sustain: !!p.sustain, duration: p.duration, tracks: p.tracks, frames: [] } };
 }
 
 // --- Icon styling, shared by every slot that renders a lucide glyph -----------------------------
@@ -300,6 +369,10 @@ window.textGradientFx = textGradientFx;
 window.textShadowLayers = textShadowLayers;
 window.iconStyle = iconStyle;
 window.STATE_KEYS = STATE_KEYS;
+window.STATE_LABELS = STATE_LABELS;
+window.shadeColor = shadeColor;
+window.applyStatePreset = applyStatePreset;
+window.stateAnimId = stateAnimId;
 window.mergeState = mergeState;
 window.stateTiming = stateTiming;
 window.stateHasOverrides = stateHasOverrides;

@@ -8,6 +8,8 @@ const pool = new Pool({
   user: process.env.DB_USER || 'postgres',
   password: process.env.DB_PASSWORD || '',
   database: process.env.DB_NAME || 'postgres',
+  // Render's external Postgres endpoint requires SSL; local Postgres doesn't support it.
+  ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
   max: 10,
 });
 

@@ -90,6 +90,14 @@ const DESKTOP_PRESETS = [
 ];
 const desktopSize = (id) => DESKTOP_PRESETS.find(p => p.id === id) || DESKTOP_PRESETS[0];
 window.DESKTOP_PRESETS = DESKTOP_PRESETS;
+// Orientation is remembered per screen-type on desktop (each preset keeps its own state), and
+// per-device for tablet/mobile/custom. Keeps 16:9 landscape/portrait from leaking into 4:3, etc.
+const orientKeyFor = (dev, presetId) => dev === 'desktop' ? `desktop:${presetId}` : dev;
+// Node geometry is remembered per desktop screen-type too, via the same override layer as
+// tablet/mobile (node.bp[key]). The default preset (std) uses the node's base x/y/w/h; every other
+// screen-type stores its own override under bp['desktop:<preset>']. So resizing a frame to fill
+// 16:9 no longer leaks its size into 4:3 — each screen-type keeps the config you gave it.
+const geomDeviceKey = (dev, presetId) => dev === 'desktop' ? (presetId && presetId !== 'std' ? `desktop:${presetId}` : 'desktop') : dev;
 
 // Per-device geometry: overrides only apply when the node opts into responsive (default on).
 function geomAt(n, dev) {
@@ -129,15 +137,26 @@ function descendantsOf(rootId, connections) {
 }
 
 // Ensure a loaded project has the workflow/variable fields (older saves predate them).
+// Migrate a node's interaction states across the trigger-model change: the old single "clickOn"
+// state becomes "click" (left-click). Key-agnostic runtime keeps everything else working as-is.
+function migrateStateNode(n) {
+  if (!n || !n.states || !n.states.clickOn) return n;
+  const states = { ...n.states };
+  states.click = { ...(states.click || {}), ...states.clickOn };
+  delete states.clickOn;
+  return { ...n, states };
+}
+
 function withWorkflowDefaults(project) {
   return {
     ...project,
     workflows: project.workflows || [],
     variables: project.variables || [],
     customComponents: project.customComponents || [],
+    customShaders: project.customShaders || [],   // user-saved GLSL shaders: [{ id, name, code }]
     enabledLibrary: project.enabledLibrary || [],
     assets: project.assets || [],   // Code-view file system: user files/folders + uploaded binaries
-    pages: (project.pages || []).map(p => ({ ...p, vars: p.vars || [] })),
+    pages: (project.pages || []).map(p => ({ ...p, vars: p.vars || [], nodes: (p.nodes || []).map(migrateStateNode) })),
   };
 }
 
@@ -154,12 +173,37 @@ window.resolveAssetSrc = window.resolveAssetSrc || function (src) {
   return hit && hit.dataUrl ? hit.dataUrl : src;
 };
 
+// Custom fonts: any font-file asset uploaded into the project becomes a usable font family whose
+// name is the filename without extension (e.g. "src/assets/fonts/Inter-Bold.woff2" -> "Inter-Bold").
+const FONT_EXT_RE = /\.(woff2?|ttf|otf)$/i;
+const FONT_FORMAT = { woff2: 'woff2', woff: 'woff', ttf: 'truetype', otf: 'opentype' };
+window.latticeFontFamilies = window.latticeFontFamilies || function (assets) {
+  const out = [];
+  (assets || []).forEach(a => {
+    if (a.type !== 'file' || !FONT_EXT_RE.test(a.path)) return;
+    const family = a.path.split('/').pop().replace(FONT_EXT_RE, '');
+    if (family && out.indexOf(family) === -1) out.push(family);
+  });
+  return out;
+};
+// Build the @font-face CSS for every font asset (used both to inject into the editor <head> and to
+// seed the exported project's index.css). `srcFor(path)` yields the url() value for that asset.
+window.latticeFontFaceCss = window.latticeFontFaceCss || function (assets, srcFor) {
+  return (assets || []).filter(a => a.type === 'file' && FONT_EXT_RE.test(a.path)).map(a => {
+    const ext = (a.path.match(FONT_EXT_RE) || [])[1].toLowerCase();
+    const family = a.path.split('/').pop().replace(FONT_EXT_RE, '');
+    const url = srcFor(a);
+    if (!url) return '';
+    return "@font-face { font-family: '" + family + "'; src: url(" + url + ") format('" + (FONT_FORMAT[ext] || 'truetype') + "'); font-display: swap; }";
+  }).filter(Boolean).join('\n');
+};
+
 // Props captured when saving a configured node as a reusable custom component (its "variant").
 const VARIANT_PROP_KEYS = ['label', 'variant', 'btnSize', 'tone', 'fillColor', 'gradient', 'shader',
   'textColor', 'fontSize', 'fontWeight', 'fontFamily', 'letterSpacing', 'textAlign', 'textTransform',
   'radius', 'radii', 'borderWidth', 'borderStyle', 'borderColor', 'effects', 'opacity',
   'layout', 'gap', 'padding', 'columns', 'align', 'justify', 'w', 'h',
-  'iconName', 'iconSize', 'placeholder', 'inputType', 'optionsText', 'checked', 'src',
+  'iconName', 'iconSize', 'iconSrc', 'iconSvg', 'placeholder', 'inputType', 'optionsText', 'checked', 'src',
   'chartType', 'chartColor', 'value'];
 function captureVariantProps(node) {
   const o = {};
@@ -203,11 +247,20 @@ function LatticeApp() {
   const [workflows, setWorkflows] = React.useState(boot.project.workflows || []);
   const [variables, setVariables] = React.useState(boot.project.variables || []); // global vars
   const [customComponents, setCustomComponents] = React.useState(boot.project.customComponents || []); // saved variants
+  const [customShaders, setCustomShaders] = React.useState(boot.project.customShaders || []);          // user-saved GLSL shaders
   const [libraryItems, setLibraryItems] = React.useState([]);                                          // this account's installed assets/plugins
   const [enabledLibrary, setEnabledLibrary] = React.useState(boot.project.enabledLibrary || []);       // library item ids enabled for THIS project
   const [assets, setAssets] = React.useState(boot.project.assets || []);                                // Code-view files/folders + uploaded images
   // Keep the global asset table in sync so window.resolveAssetSrc (used by the node renderer) sees them.
-  React.useEffect(() => { window.__latticeAssets = assets; }, [assets]);
+  // Also register uploaded fonts: expose their family names and inject @font-face rules so text
+  // components render the custom font on the canvas AND in Preview (both use window.PreviewNode).
+  React.useEffect(() => {
+    window.__latticeAssets = assets;
+    window.__latticeFonts = window.latticeFontFamilies(assets);
+    let el = document.getElementById('lattice-fonts');
+    if (!el) { el = document.createElement('style'); el.id = 'lattice-fonts'; document.head.appendChild(el); }
+    el.textContent = window.latticeFontFaceCss(assets, a => a.dataUrl);
+  }, [assets]);
   // Add an uploaded image under src/assets/ and return its internal path (used by the Inspector so a
   // component can reference an image by internal path instead of a URL).
   const addImageAsset = (name, dataUrl, mime) => {
@@ -224,8 +277,9 @@ function LatticeApp() {
   const shaderPresets = React.useMemo(() => {
     const out = { ...(window.SHADER_PRESETS || {}) };
     enabledItems.filter(i => i.type === 'shader' && i.data && i.data.code).forEach(i => { out[i.name] = i.data.code; });
+    (customShaders || []).forEach(s => { if (s && s.name && s.code) out[s.name] = s.code; });
     return out;
-  }, [enabledItems]);
+  }, [enabledItems, customShaders]);
   const libraryComponents = React.useMemo(() =>
     enabledItems.filter(i => i.type === 'component' && i.data && i.data.base)
       .map(i => ({ id: 'lib_' + i.id, name: i.name, icon: 'component', base: i.data.base, props: i.data.props || {} })),
@@ -248,6 +302,11 @@ function LatticeApp() {
   const [openAnimTabs, setOpenAnimTabs] = React.useState([]);
   const [activeAnimId, setActiveAnimId] = React.useState(null);      // active anim tab id, or null when a page is active
   const [animFrameIdx, setAnimFrameIdx] = React.useState(0);         // selected keyframe in the active anim tab
+  const [sceneOpen, setSceneOpen] = React.useState(false);           // page scene-timeline editor open
+  const [dock, setDock] = React.useState(null);                      // torn-off tab preview dock: {type,pageId,nodeId?,stateId?}
+  const [dockH, setDockH] = React.useState(220);                     // dock height (drag to resize)
+  const [tearing, setTearing] = React.useState(false);               // dragging a tab toward the bottom drop zone
+  const tearRef = React.useRef(null);
   const [panelW, setPanelW] = React.useState(() => {                 // resizable side-panel widths (per-user)
     try { return { left: 280, right: 280, ...JSON.parse(localStorage.getItem('lattice_panels') || '{}') }; } catch { return { left: 280, right: 280 }; }
   });
@@ -279,8 +338,11 @@ function LatticeApp() {
   const page = pages.find(p => p.id === activePageId) || pages[0];
   const nodes = page.nodes;
   const connections = page.connections;
+  // Geometry "device": resolves desktop screen-types to their own override layer (see geomDeviceKey),
+  // so each 16:9 / 4:3 / … screen-type remembers its own node sizes & positions.
+  const geomDevice = geomDeviceKey(activeDevice, settings.desktopPreset);
   // Nodes resolved to the active device's geometry — what the canvas/preview/inspector render.
-  const viewNodes = React.useMemo(() => nodes.map(n => ({ ...n, ...geomAt(n, activeDevice) })), [nodes, activeDevice]);
+  const viewNodes = React.useMemo(() => nodes.map(n => ({ ...n, ...geomAt(n, geomDevice) })), [nodes, geomDevice]);
   const selected = viewNodes.find(n => n.id === selectedId) || null;
   // When editing a non-default interaction state, the Inspector shows/edits the merged node and the
   // design canvas previews that state on the selected node only.
@@ -303,6 +365,7 @@ function LatticeApp() {
   const animNode = activeAnim ? (viewNodes.find(n => n.id === activeAnim.nodeId) || null) : null;
   const animState = (activeAnim && animNode) ? (animNode.customStates || []).find(c => c.id === activeAnim.stateId) || null : null;
   const animValid = !!(activeAnim && animNode && animState);       // tab still points at a live node+state
+  const showScene = sceneOpen && !animValid;                       // page scene-timeline editor is active
   const animFrame = animValid ? (animState.frames || [])[animFrameIdx] : null;
   // While an anim tab is open, the Inspector edits the selected keyframe's captured pose.
   const animInspectorNode = animValid ? (window.mergeFrame ? window.mergeFrame(animNode, animFrame) : animNode) : null;
@@ -313,12 +376,24 @@ function LatticeApp() {
     const cs = n && (n.customStates || []).find(c => c.id === t.stateId);
     return { id: t.id, label: (cs && cs.name) || 'Animation' };
   });
+  // Resolve the bottom dock's descriptor to the live node/state (anim) or page it should preview.
+  const dockTarget = React.useMemo(() => {
+    if (!dock) return null;
+    const pg = pages.find(p => p.id === dock.pageId);
+    if (!pg) return null;
+    if (dock.type === 'anim') {
+      const n = (pg.nodes || []).find(x => x.id === dock.nodeId) || null;
+      const st = (n && (n.customStates || []).find(c => c.id === dock.stateId)) || null;
+      return { type: 'anim', node: n, state: st };
+    }
+    return { type: 'page', page: pg };
+  }, [dock, pages]);
   // Artboard size = custom size as-is, or a preset oriented portrait/landscape.
   const artboard = React.useMemo(() => {
     if (activeDevice === 'custom') return (settings.customSize && settings.customSize.w) ? settings.customSize : { w: 1200, h: 800 };
     const b = activeDevice === 'desktop' ? desktopSize(settings.desktopPreset) : (DEVICE[activeDevice] || DEVICE.desktop);
     const lo = Math.max(b.w, b.h), sh = Math.min(b.w, b.h);
-    return (orient[activeDevice] || 'landscape') === 'portrait' ? { w: sh, h: lo } : { w: lo, h: sh };
+    return (orient[orientKeyFor(activeDevice, settings.desktopPreset)] || 'landscape') === 'portrait' ? { w: sh, h: lo } : { w: lo, h: sh };
   }, [activeDevice, orient, settings.customSize, settings.desktopPreset]);
 
   const setCustomSize = (w, h) => setSettings(s => ({ ...s, customSize: { w: Math.max(200, Math.round(+w) || 1200), h: Math.max(200, Math.round(+h) || 800) } }));
@@ -329,7 +404,7 @@ function LatticeApp() {
     if (activeDeviceRef.current === 'custom') {
       setSettings(s => { const c = s.customSize || { w: 1200, h: 800 }; return { ...s, customSize: { w: c.h, h: c.w } }; });
     } else {
-      setOrient(o => { const d = activeDeviceRef.current; return { ...o, [d]: (o[d] || 'landscape') === 'landscape' ? 'portrait' : 'landscape' }; });
+      setOrient(o => { const k = orientKeyFor(activeDeviceRef.current, settings.desktopPreset); return { ...o, [k]: (o[k] || 'landscape') === 'landscape' ? 'portrait' : 'landscape' }; });
     }
   };
 
@@ -348,6 +423,7 @@ function LatticeApp() {
   const selectedIdsRef = React.useRef(selectedIds);
   const activePageIdRef = React.useRef(activePageId);
   const activeDeviceRef = React.useRef('desktop');
+  const geomDeviceRef = React.useRef('desktop'); // active geometry layer (device or desktop:<preset>)
   const clipboardRef = React.useRef(null);
   const lastNudgeRef = React.useRef(0);
   const dragUndoRef = React.useRef(null);
@@ -371,6 +447,7 @@ function LatticeApp() {
   React.useEffect(() => { selectedIdsRef.current = selectedIds; }, [selectedIds]);
   React.useEffect(() => { activePageIdRef.current = activePageId; }, [activePageId]);
   React.useEffect(() => { activeDeviceRef.current = activeDevice; }, [activeDevice]);
+  React.useEffect(() => { geomDeviceRef.current = geomDevice; }, [geomDevice]);
   React.useEffect(() => { artboardRef.current = artboard; }, [artboard]);
   React.useEffect(() => { workflowsRef.current = workflows; }, [workflows]);
   React.useEffect(() => { variablesRef.current = variables; }, [variables]);
@@ -394,6 +471,7 @@ function LatticeApp() {
         }
         setWorkflows(c.workflows || []); setVariables(c.variables || []);
         setCustomComponents(c.customComponents || []);
+        setCustomShaders(c.customShaders || []);
         setEnabledLibrary(c.enabledLibrary || []);
         setActiveWorkflowId((c.workflows || [])[0]?.id || null);
         setSelectedIds([]);
@@ -419,11 +497,11 @@ function LatticeApp() {
     const t = setTimeout(() => {
       fetch('/api/projects/' + projectId, {
         method: 'PUT', credentials: 'include', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ canvas: { pages, activePageId, workflows, variables, customComponents, enabledLibrary, assets } }),
+        body: JSON.stringify({ canvas: { pages, activePageId, workflows, variables, customComponents, customShaders, enabledLibrary, assets } }),
       }).catch(() => {}).finally(() => setSaving(false));
     }, 800);
     return () => clearTimeout(t);
-  }, [projectId, pages, activePageId, workflows, variables, customComponents, enabledLibrary]);
+  }, [projectId, pages, activePageId, workflows, variables, customComponents, customShaders, enabledLibrary, assets]);
 
   const fireToast = (t) => {
     setToast(t);
@@ -563,12 +641,13 @@ function LatticeApp() {
     applySnapshot(next);
   }, [applySnapshot]);
 
-  // Device-aware geometry write: desktop → base props; tablet/mobile → node.bp[device] override.
+  // Device-aware geometry write: desktop (default screen-type) → base props; tablet/mobile and every
+  // non-default desktop screen-type → node.bp[key] override.
   // A non-responsive node ignores the device and always writes its shared base (identical everywhere).
   const writeGeom = React.useCallback((id, patch) => {
     setNodes(ns => ns.map(n => {
       if (n.id !== id) return n;
-      const dev = n.responsive === false ? 'desktop' : activeDeviceRef.current;
+      const dev = n.responsive === false ? 'desktop' : geomDeviceRef.current;
       if (dev === 'desktop') return { ...n, ...patch };
       const cur = (n.bp && n.bp[dev]) || { x: n.x, y: n.y, w: n.w, h: n.h, hidden: !!n.hidden };
       return { ...n, bp: { ...n.bp, [dev]: { ...cur, ...patch } } };
@@ -654,13 +733,7 @@ function LatticeApp() {
     const nodeId = selectedIdsRef.current[0];
     if (!nodeId || !stateId) return;
     const pageId = activePageIdRef.current;
-    // Seed a first keyframe (captured from the current look) so the board always opens with Keyframe 1.
-    const n = nodesRef.current.find(x => x.id === nodeId);
-    const cs = n && (n.customStates || []).find(c => c.id === stateId);
-    if (cs && (!cs.frames || cs.frames.length === 0)) {
-      const ov = (window.capturePose && window.mergeState) ? window.capturePose(window.mergeState(n, stateId)) : {};
-      framesOf(nodeId, stateId, () => [{ id: uid('fr'), dur: 400, ov }]);
-    }
+    // The timeline opens empty (no tracks) — the user adds property tracks + keyframes themselves.
     const existing = openAnimTabsRef.current.find(t => t.nodeId === nodeId && t.stateId === stateId && t.pageId === pageId);
     if (existing) setActiveAnimId(existing.id);
     else { const id = uid('anim'); setOpenAnimTabs(ts => [...ts, { id, pageId, nodeId, stateId }]); setActiveAnimId(id); }
@@ -677,6 +750,87 @@ function LatticeApp() {
     if (t.pageId !== activePageIdRef.current) setActivePageId(t.pageId);
     setSelectedIds([t.nodeId]);
   }, []);
+
+  // --- Interaction-state bindings: one-click presets + assigning animations to built-in triggers ---
+  // Apply a default preset to a trigger — either a static override or a freshly-bound animation.
+  const applyPreset = React.useCallback((trigger) => {
+    const nodeId = selectedIdsRef.current[0]; if (!nodeId) return;
+    const n = nodesRef.current.find(x => x.id === nodeId); if (!n) return;
+    const desc = window.applyStatePreset && window.applyStatePreset(n, trigger);
+    if (!desc) return;
+    if (desc.kind === 'static') {
+      setNodes(ns => ns.map(x => x.id === nodeId
+        ? { ...x, states: { ...x.states, [trigger]: { off: false, ...desc.states } } } : x));
+    } else {
+      const id = uid('st');
+      setNodes(ns => ns.map(x => x.id === nodeId
+        ? { ...x, customStates: [...(x.customStates || []), { id, ...desc.state }],
+            states: { ...x.states, [trigger]: { ...(x.states && x.states[trigger]), off: false, animId: id, preset: desc.preset } } } : x));
+    }
+  }, [setNodes]);
+
+  // Bind/unbind an animation to a built-in trigger. value: '' → static · '__use' → enter animation
+  // mode (reuse newest or create) · '__new' → create + open editor · <id> → assign that animation.
+  const bindAnim = React.useCallback((trigger, value) => {
+    const nodeId = selectedIdsRef.current[0]; if (!nodeId) return;
+    const n = nodesRef.current.find(x => x.id === nodeId); if (!n) return;
+    const anims = (n.customStates || []).filter(c => (c.type || 'static') === 'anim');
+    const setBinding = (animId) => setNodes(ns => ns.map(x => x.id === nodeId
+      ? { ...x, states: { ...x.states, [trigger]: { ...(x.states && x.states[trigger]), off: false, animId } } } : x));
+    if (value === '') { setBinding(''); return; }
+    if (value === '__use') {
+      const cur = n.states && n.states[trigger] && n.states[trigger].animId;
+      if (cur) return;                           // already in animation mode
+      if (anims.length) { setBinding(anims[anims.length - 1].id); return; }
+      value = '__new';                           // no animation yet → create one
+    }
+    if (value === '__new') {
+      const id = uid('st');
+      const name = 'Animation ' + ((n.customStates || []).length + 1);
+      setNodes(ns => ns.map(x => x.id === nodeId
+        ? { ...x, customStates: [...(x.customStates || []), { id, name, type: 'anim', loop: false, duration: 400, tracks: [], frames: [] }],
+            states: { ...x.states, [trigger]: { ...(x.states && x.states[trigger]), off: false, animId: id } } } : x));
+      setTimeout(() => openAnimEditor(id), 0);
+      return;
+    }
+    setBinding(value);                           // assign an existing animation by id
+  }, [setNodes, openAnimEditor]);
+
+  // --- Bottom preview dock: drag a page/anim tab down past the drop zone to open a live preview ---
+  const openDockFor = React.useCallback((d) => {
+    if (!d) return;
+    if (d.type === 'anim') {
+      const t = openAnimTabsRef.current.find(x => x.id === d.animTabId);
+      if (t) setDock({ type: 'anim', pageId: t.pageId, nodeId: t.nodeId, stateId: t.stateId });
+    } else if (d.type === 'page') {
+      setDock({ type: 'page', pageId: d.pageId });
+    }
+  }, []);
+  // Started on a tab's mousedown; arms once the pointer is dragged down, docks if released in the zone.
+  const startTabTear = React.useCallback((descriptor, e) => {
+    if (e.button !== 0) return;
+    if (e.target.closest && e.target.closest('button, input')) return; // leave close/rename alone
+    const sy = e.clientY, data = { armed: false };
+    tearRef.current = data;
+    const move = (ev) => {
+      if (!tearRef.current) return;
+      if (!data.armed && ev.clientY - sy > 22) { data.armed = true; setTearing(true); document.body.style.userSelect = 'none'; }
+    };
+    const up = (ev) => {
+      document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up);
+      document.body.style.userSelect = ''; tearRef.current = null;
+      if (data.armed) { setTearing(false); if (ev.clientY > window.innerHeight - 150) openDockFor(descriptor); }
+    };
+    document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
+  }, [openDockFor]);
+  const startDockResize = (e) => {
+    e.preventDefault();
+    const sy = e.clientY, h0 = dockH;
+    const move = (ev) => setDockH(Math.max(120, Math.min(520, Math.round(h0 - (ev.clientY - sy)))));
+    const up = () => { document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); document.body.style.cursor = ''; document.body.style.userSelect = ''; };
+    document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
+    document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none';
+  };
   const animAddFrame = React.useCallback(() => {
     const t = activeAnimRef.current; if (!t) return;
     const n = nodesRef.current.find(x => x.id === t.nodeId);
@@ -724,6 +878,48 @@ function LatticeApp() {
     const i = animFrameIdxRef.current;
     framesOf(t.nodeId, t.stateId, fr => fr.map((f, j) => j === i ? { ...f, ov: { ...f.ov, ...patch } } : f));
   }, []);
+
+  // --- Timeline (dope-sheet) editing: mutate the active anim tab's per-property tracks ------------
+  // Every edit runs the active state's tracks through `fn`; legacy card `frames` migrate to tracks on
+  // first touch (then are cleared so the old auto-play path yields to the timeline).
+  const mutTracks = (fn) => {
+    const t = activeAnimRef.current; if (!t) return;
+    setNodes(ns => ns.map(n => n.id !== t.nodeId ? n : {
+      ...n, customStates: (n.customStates || []).map(c => {
+        if (c.id !== t.stateId) return c;
+        const base = window.ensureTracks ? window.ensureTracks(c) : c;
+        const tracks = fn((base.tracks || []).map(tr => ({ ...tr, keys: (tr.keys || []).slice() })));
+        return { ...base, tracks, frames: [] };
+      }),
+    }));
+  };
+  const animAddTrack = React.useCallback((prop, nodeId, value) => mutTracks(trs => {
+    if (trs.some(tr => tr.prop === prop && (!nodeId || tr.nodeId === nodeId))) return trs; // no duplicate track
+    return [...trs, Object.assign({ prop, keys: [{ t: 0, value, ease: 'ease-out' }] }, nodeId ? { nodeId } : null)];
+  }), [setNodes]);
+  const animDeleteTrack = React.useCallback((ti) => mutTracks(trs => trs.filter((_, i) => i !== ti)), [setNodes]);
+  // Add a key (replacing any at the exact same time). Storage order is not sorted — the sampler sorts.
+  const animAddKey = React.useCallback((ti, t, value) => mutTracks(trs => trs.map((tr, i) => i === ti
+    ? { ...tr, keys: [...tr.keys.filter(k => k.t !== t), { t, value, ease: 'ease-out' }] } : tr)), [setNodes]);
+  const animUpdateKey = React.useCallback((ti, ki, patch) => mutTracks(trs => trs.map((tr, i) => i === ti
+    ? { ...tr, keys: tr.keys.map((k, j) => j === ki ? { ...k, ...patch } : k) } : tr)), [setNodes]);
+  const animDeleteKey = React.useCallback((ti, ki) => mutTracks(trs => trs.map((tr, i) => i === ti
+    ? { ...tr, keys: tr.keys.filter((_, j) => j !== ki) } : tr).filter(tr => (tr.keys || []).length)), [setNodes]);
+  const animSetDuration = React.useCallback((ms) => { const t = activeAnimRef.current; if (!t) return; setNodes(ns => ns.map(n => n.id === t.nodeId ? { ...n, customStates: (n.customStates || []).map(c => c.id === t.stateId ? { ...c, duration: ms } : c) } : n)); }, [setNodes]);
+  const animSetLoopState = React.useCallback((on) => { const t = activeAnimRef.current; if (!t) return; setNodes(ns => ns.map(n => n.id === t.nodeId ? { ...n, customStates: (n.customStates || []).map(c => c.id === t.stateId ? { ...c, loop: on } : c) } : n)); }, [setNodes]);
+
+  // --- Page scene timeline: a whole-screen animation whose tracks each target one node's property. --
+  const SCENE_DEFAULT = { on: true, loop: true, autoplay: true, duration: 2000, tracks: [] };
+  const mutTimeline = (fn) => setPages(ps => ps.map(p => p.id === activePageIdRef.current
+    ? { ...p, timeline: fn({ ...SCENE_DEFAULT, ...(p.timeline || {}) }) } : p));
+  const sceneAddTrack = (prop, nodeId, value) => mutTimeline(tl => (tl.tracks.some(tr => tr.nodeId === nodeId && tr.prop === prop) ? tl : { ...tl, tracks: [...tl.tracks, { nodeId, prop, keys: [{ t: 0, value, ease: 'ease-out' }] }] }));
+  const sceneDeleteTrack = (ti) => mutTimeline(tl => ({ ...tl, tracks: tl.tracks.filter((_, i) => i !== ti) }));
+  const sceneAddKey = (ti, t, value) => mutTimeline(tl => ({ ...tl, tracks: tl.tracks.map((tr, i) => i === ti ? { ...tr, keys: [...tr.keys.filter(k => k.t !== t), { t, value, ease: 'ease-out' }] } : tr) }));
+  const sceneUpdateKey = (ti, ki, patch) => mutTimeline(tl => ({ ...tl, tracks: tl.tracks.map((tr, i) => i === ti ? { ...tr, keys: tr.keys.map((k, j) => j === ki ? { ...k, ...patch } : k) } : tr) }));
+  const sceneDeleteKey = (ti, ki) => mutTimeline(tl => ({ ...tl, tracks: tl.tracks.map((tr, i) => i === ti ? { ...tr, keys: tr.keys.filter((_, j) => j !== ki) } : tr).filter(tr => (tr.keys || []).length) }));
+  const sceneSetDuration = (ms) => mutTimeline(tl => ({ ...tl, duration: ms }));
+  const sceneSetLoop = (on) => mutTimeline(tl => ({ ...tl, loop: on }));
+  const openSceneTimeline = () => { setSceneOpen(s => !s); setActiveAnimId(null); setView('design'); };
 
   // Canvas signals move/resize start → capture the RAW pre-drag state (base + bp) for undo.
   const onInteractStart = React.useCallback(() => {
@@ -833,7 +1029,7 @@ function LatticeApp() {
     const now = Date.now();
     if (now - lastNudgeRef.current > 600) pushHistory();
     lastNudgeRef.current = now;
-    const dev = activeDeviceRef.current;
+    const dev = geomDeviceRef.current;
     ids.forEach(id => {
       const n = nodesRef.current.find(x => x.id === id);
       if (n && !n.locked) { const g = geomAt(n, dev); writeGeom(id, { x: g.x + dx, y: g.y + dy }); }
@@ -844,7 +1040,7 @@ function LatticeApp() {
     const n = nodesRef.current.find(x => x.id === id);
     if (!n) return;
     pushHistory();
-    writeGeom(id, { hidden: !geomAt(n, activeDeviceRef.current).hidden });
+    writeGeom(id, { hidden: !geomAt(n, geomDeviceRef.current).hidden });
   }, [pushHistory, writeGeom]);
 
   const toggleLock = React.useCallback((id) => {
@@ -859,7 +1055,7 @@ function LatticeApp() {
 
   const alignNodes = React.useCallback((ids, edge) => {
     if (!ids || ids.length === 0) return;
-    const dev = activeDeviceRef.current;
+    const dev = geomDeviceRef.current;
 
     // Single node: align/center within its parent frame, or the artboard if it has no parent.
     // Centering yields equal margins on both sides ("center" does both axes at once).
@@ -922,7 +1118,7 @@ function LatticeApp() {
   const distributeNodes = React.useCallback((ids, axis) => {
     if (!ids || ids.length < 3) return;
     pushHistory();
-    const dev = activeDeviceRef.current;
+    const dev = geomDeviceRef.current;
     const key = axis === 'h' ? 'x' : 'y', size = axis === 'h' ? 'w' : 'h';
     const arr = ids.map(id => { const n = nodesRef.current.find(x => x.id === id); return n ? { id, n, ...geomAt(n, dev) } : null; })
       .filter(Boolean).sort((a, b) => a[key] - b[key]);
@@ -968,7 +1164,7 @@ function LatticeApp() {
     const targetIds = ((ids && ids.length ? ids : selectedIdsRef.current) || []).filter(id => nodesRef.current.some(n => n.id === id));
     if (!targetIds.length) return;
     pushHistory();
-    const dev = activeDeviceRef.current;
+    const dev = geomDeviceRef.current;
     const geoms = targetIds.map(id => geomAt(nodesRef.current.find(x => x.id === id), dev));
     const minX = Math.min(...geoms.map(g => g.x)), minY = Math.min(...geoms.map(g => g.y));
     const maxX = Math.max(...geoms.map(g => g.x + g.w)), maxY = Math.max(...geoms.map(g => g.y + g.h));
@@ -1063,7 +1259,8 @@ function LatticeApp() {
   // --- Shader code editor ---
   const [shaderEditFor, setShaderEditFor] = React.useState(null); // node id being edited
   const [shaderError, setShaderError] = React.useState(null);
-  const openShaderEditor = (id) => { setShaderError(null); setShaderEditFor(id); };
+  const [customShaderName, setCustomShaderName] = React.useState(''); // name field for saving a custom shader
+  const openShaderEditor = (id) => { setShaderError(null); setCustomShaderName(''); setShaderEditFor(id); };
   const setShaderCode = (code) => {
     const n = nodesRef.current.find(x => x.id === shaderEditFor);
     if (n) updateNode(shaderEditFor, { shader: { ...(n.shader || {}), on: true, code } });
@@ -1072,6 +1269,17 @@ function LatticeApp() {
     const n = nodesRef.current.find(x => x.id === shaderEditFor);
     if (n) updateNode(shaderEditFor, { shader: { ...(n.shader || {}), on: true, preset: k, code: shaderPresets[k] } });
   };
+  // Save the current shader code as a reusable custom preset (project-level; same name overwrites).
+  const isBuiltInShader = (name) => !!(window.SHADER_PRESETS && window.SHADER_PRESETS[name]);
+  const saveCustomShader = (name, code) => {
+    const nm = (name || '').trim();
+    if (!nm || !code) { fireToast({ tone: 'warning', title: 'Nothing to save', message: 'Enter a name and some shader code.' }); return; }
+    if (isBuiltInShader(nm)) { fireToast({ tone: 'warning', title: 'Reserved name', message: '"' + nm + '" is a built-in preset — pick another name.' }); return; }
+    setCustomShaders(list => [...list.filter(s => s.name !== nm), { id: uid('sh'), name: nm, code }]);
+    setCustomShaderName('');
+    fireToast({ tone: 'success', title: 'Shader saved', message: nm + ' added to your presets.' });
+  };
+  const deleteCustomShader = (name) => setCustomShaders(list => list.filter(s => s.name !== name));
 
   // --- Plugin / animation command menu (⌘/Ctrl-K) ---
   const [cmdOpen, setCmdOpen] = React.useState(false);
@@ -1168,7 +1376,7 @@ function LatticeApp() {
 
   const copyLink = () => {
     try {
-      const encoded = btoa(unescape(encodeURIComponent(JSON.stringify({ pages, activePageId, workflows, variables, customComponents, enabledLibrary })))).replace(/=/g, '');
+      const encoded = btoa(unescape(encodeURIComponent(JSON.stringify({ pages, activePageId, workflows, variables, customComponents, customShaders, enabledLibrary })))).replace(/=/g, '');
       const url = window.location.href.split('#')[0] + '#project=' + encoded;
       navigator.clipboard.writeText(url).then(() => {
         fireToast({ tone: 'success', title: 'Link copied to clipboard' });
@@ -1198,12 +1406,12 @@ function LatticeApp() {
   // Persist project + settings (standalone editor only; project canvases live in the DB)
   React.useEffect(() => {
     if (projectId) return;
-    try { localStorage.setItem('lattice_project_v2', JSON.stringify({ project: { pages, activePageId, workflows, variables, customComponents, enabledLibrary, assets }, settings })); } catch {}
-  }, [pages, activePageId, workflows, variables, customComponents, enabledLibrary, settings, projectId]);
+    try { localStorage.setItem('lattice_project_v2', JSON.stringify({ project: { pages, activePageId, workflows, variables, customComponents, customShaders, enabledLibrary, assets }, settings })); } catch {}
+  }, [pages, activePageId, workflows, variables, customComponents, customShaders, enabledLibrary, assets, settings, projectId]);
 
   // Export / import the whole project as JSON (an editor tool)
   const exportProject = () => {
-    const blob = new Blob([JSON.stringify({ pages, activePageId, workflows, variables, customComponents, enabledLibrary, assets, settings }, null, 2)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify({ pages, activePageId, workflows, variables, customComponents, customShaders, enabledLibrary, assets, settings }, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url; a.download = (projectName || 'lattice-project').replace(/\s+/g, '-').toLowerCase() + '.json';
@@ -1223,6 +1431,7 @@ function LatticeApp() {
           setPages(proj.pages); setActivePageId(proj.activePageId || proj.pages[0].id);
           setWorkflows(proj.workflows || []); setVariables(proj.variables || []);
           setCustomComponents(proj.customComponents || []);
+          setCustomShaders(proj.customShaders || []);
           setEnabledLibrary(proj.enabledLibrary || []);
           setAssets(proj.assets || []);
           setActiveWorkflowId((proj.workflows || [])[0]?.id || null);
@@ -1341,7 +1550,7 @@ function LatticeApp() {
     return (
       <div style={{ position: 'fixed', inset: 0, display: 'flex', flexDirection: 'column', background: 'var(--bg-app)' }}>
         <PreviewCanvas nodes={viewNodes} connections={connections} artboard={artboard} device={activeDevice}
-          onAction={onPreviewAction} runtime={previewRuntime} runtimeProps={runtimeProps} />
+          onAction={onPreviewAction} runtime={previewRuntime} runtimeProps={runtimeProps} pageTimeline={page.timeline} />
         <WorkflowRunLog runs={runLog} onClear={() => setRunLog([])} />
         <Dialog open={!!previewDialog} onClose={() => setPreviewDialog(null)} title={previewDialog ? previewDialog.title : ''}
           footer={<Button variant="solid" size="sm" onClick={() => setPreviewDialog(null)}>Close</Button>}>
@@ -1368,7 +1577,7 @@ function LatticeApp() {
         device={activeDevice} onSetDevice={setActiveDevice}
         responsive={settings.responsive !== false}
         desktopPreset={settings.desktopPreset} onSetDesktopPreset={setDesktopPreset}
-        artboard={artboard} orientation={orient[activeDevice]}
+        artboard={artboard} orientation={orient[orientKeyFor(activeDevice, settings.desktopPreset)]}
         onToggleOrientation={toggleOrientation}
         customSize={settings.customSize} onSetCustomSize={setCustomSize}
         onOpenSettings={() => setSettingsOpen(true)}
@@ -1403,13 +1612,23 @@ function LatticeApp() {
 
         {/* Center column: VS Code-style page tabs sit above the view area only, between the panels. */}
         <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-          <PageTabs pages={pages} activePageId={activePageId} onSelectPage={selectPage} onAddPage={addPage} onRenamePage={renamePage} onDeletePage={deletePage}
-            animTabs={animTabList} activeAnimId={activeAnimId} onSelectAnim={selectAnimTab} onCloseAnim={closeAnimTab} />
+          {view === 'design' && (
+            <PageTabs pages={pages} activePageId={activePageId} onSelectPage={selectPage} onAddPage={addPage} onRenamePage={renamePage} onDeletePage={deletePage}
+              animTabs={animTabList} activeAnimId={activeAnimId} onSelectAnim={selectAnimTab} onCloseAnim={closeAnimTab} onTearTab={startTabTear}
+              onOpenSceneTimeline={openSceneTimeline} sceneActive={showScene} />
+          )}
           {animValid ? (
-            <AnimCanvas node={animNode} state={animState} activeFrame={animFrameIdx}
-              onSelectFrame={setAnimFrameIdx} onAddFrame={animAddFrame} onDeleteFrame={animDeleteFrame}
-              onUpdateFrame={animUpdateFrame} onUpdateState={animUpdateState}
-              onReorderFrame={animReorderFrame} onTidyUp={animTidyUp} />
+            <TimelineEditor node={animNode} state={window.ensureTracks ? window.ensureTracks(animState) : animState}
+              palette={settings.palette || []}
+              onAddTrack={animAddTrack} onDeleteTrack={animDeleteTrack}
+              onAddKey={animAddKey} onUpdateKey={animUpdateKey} onDeleteKey={animDeleteKey}
+              onSetDuration={animSetDuration} onSetLoop={animSetLoopState} />
+          ) : showScene ? (
+            <TimelineEditor pageMode pageNodes={viewNodes} palette={settings.palette || []}
+              state={{ name: 'Scene · ' + page.name, tracks: (page.timeline || {}).tracks || [], duration: (page.timeline || {}).duration || 2000, loop: (page.timeline || {}).loop !== false }}
+              onAddTrack={sceneAddTrack} onDeleteTrack={sceneDeleteTrack}
+              onAddKey={sceneAddKey} onUpdateKey={sceneUpdateKey} onDeleteKey={sceneDeleteKey}
+              onSetDuration={sceneSetDuration} onSetLoop={sceneSetLoop} />
           ) : (
             <>
               {view === 'design' && !previewMode && (
@@ -1422,7 +1641,7 @@ function LatticeApp() {
                   onAlign={alignNodes} onDistribute={distributeNodes} viewRef={canvasViewRef} actions={actions}
                 />
               )}
-              {view === 'design' && previewMode && <PreviewCanvas nodes={viewNodes} connections={connections} artboard={artboard} device={activeDevice} onAction={onPreviewAction} runtime={previewRuntime} runtimeProps={runtimeProps} />}
+              {view === 'design' && previewMode && <PreviewCanvas nodes={viewNodes} connections={connections} artboard={artboard} device={activeDevice} onAction={onPreviewAction} runtime={previewRuntime} runtimeProps={runtimeProps} pageTimeline={page.timeline} />}
               {view === 'code' && <CodePanel pages={pages} activePageId={activePageId} assets={assets} onChangeAssets={setAssets} projectName={projectName} settings={settings} />}
               {view === 'rel' && (
                 <RelationshipsView nodes={nodes} connections={connections} onSelect={(id) => { selectOne(id); setView('design'); }} />
@@ -1438,13 +1657,16 @@ function LatticeApp() {
               )}
             </>
           )}
+          {view === 'design' && dockTarget && window.PreviewDock && (
+            <window.PreviewDock target={dockTarget} height={dockH} onClose={() => setDock(null)} onResizeStart={startDockResize} />
+          )}
         </div>
 
         {view === 'design' && (
           <Inspector
             width={panelW.right}
-            node={animValid ? animInspectorNode : inspectorNode}
-            onChange={animValid ? ((id, patch) => editFrameOv(patch)) : editNode}
+            node={animValid ? animNode : inspectorNode}
+            onChange={animValid ? updateNode : editNode}
             onBaseChange={updateNode} onRename={renameNode}
             connections={connections} onDelete={deleteNode} onDetach={detachNode}
             onDuplicate={() => selected && duplicateNodes([selected.id])}
@@ -1455,7 +1677,8 @@ function LatticeApp() {
             workflows={workflows} variables={variables} pageVars={page.vars || []}
             editingState={editingState} onSetEditingState={setEditingStateReset}
             singleSelected={animValid ? true : selectedIds.length === 1}
-            frameEditing={animValid} onOpenAnimEditor={openAnimEditor}
+            frameEditing={false} onOpenAnimEditor={openAnimEditor}
+            onApplyPreset={applyPreset} onBindAnim={bindAnim}
             onSaveAsComponent={openSaveAsComponent} onEditShader={openShaderEditor}
             shaderPresets={shaderPresets}
             onResetState={resetState}
@@ -1468,6 +1691,19 @@ function LatticeApp() {
         {view === 'design' && resizer('left')}
         {view === 'design' && resizer('right')}
       </div>
+
+      {/* Drop zone shown while dragging a tab down — release here to open the bottom preview dock. */}
+      {tearing && (
+        <div style={{ position: 'fixed', left: 0, right: 0, bottom: 0, height: 150, zIndex: 9998, pointerEvents: 'none',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: 'linear-gradient(to top, color-mix(in srgb, var(--blue-base) 22%, transparent), transparent)',
+          borderTop: '2px dashed var(--blue-base)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 16px', background: 'var(--surface-raised)',
+            border: '1px solid var(--blue-base)', borderRadius: 8, color: 'var(--text-primary)', fontSize: 13, fontWeight: 500, boxShadow: 'var(--shadow-overlay)' }}>
+            <span style={{ color: 'var(--blue-base)', fontSize: 16, lineHeight: 1 }}>↧</span> Drop here to open a preview dock
+          </div>
+        </div>
+      )}
 
       <Dialog open={shareOpen} onClose={() => setShareOpen(false)} title="Share project"
         description="Anyone with the link can view this canvas."
@@ -1597,9 +1833,30 @@ function LatticeApp() {
                 style={{ width: '100%', height: 210, resize: 'vertical', fontFamily: 'var(--font-mono)', fontSize: 12, lineHeight: 1.5, padding: 10, border: '1px solid var(--border-default)', background: 'var(--surface-inset)', color: 'var(--text-primary)', outline: 'none', boxSizing: 'border-box' }} />
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                 <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Load preset:</span>
-                {Object.keys(shaderPresets).map(k => (
-                  <Button key={k} variant="ghost" size="sm" onClick={() => loadShaderPreset(k)}>{k}</Button>
-                ))}
+                {Object.keys(shaderPresets).map(k => {
+                  const isCustom = (customShaders || []).some(s => s.name === k);
+                  const isActive = (sn.shader && sn.shader.preset) === k;
+                  return (
+                    <span key={k} style={{ display: 'inline-flex', alignItems: 'center', ...(isCustom ? { border: '1px solid var(--border-subtle)', borderRadius: 4 } : {}) }}>
+                      <Button variant={isActive ? 'solid' : 'ghost'} size="sm" onClick={() => loadShaderPreset(k)}
+                        iconLeft={isActive ? <i data-lucide="check"></i> : undefined}>{k}</Button>
+                      {isCustom && (
+                        <button type="button" title={'Delete "' + k + '"'} onClick={() => deleteCustomShader(k)}
+                          style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 18, height: 22, border: 0, borderLeft: '1px solid var(--border-subtle)', background: 'transparent', color: 'var(--text-muted)', cursor: 'pointer', fontSize: 13 }}>×</button>
+                      )}
+                    </span>
+                  );
+                })}
+              </div>
+              {/* Save the current code as a reusable custom shader (persists with the project). */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, borderTop: '1px solid var(--border-subtle)', paddingTop: 10 }}>
+                <div style={{ flex: 1 }}>
+                  <Input size="sm" placeholder="Name this shader to save it…" value={customShaderName}
+                    onChange={e => setCustomShaderName(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') saveCustomShader(customShaderName, sn.shader && sn.shader.code); }} />
+                </div>
+                <Button variant="outline" size="sm" iconLeft={<i data-lucide="save"></i>}
+                  onClick={() => saveCustomShader(customShaderName, sn.shader && sn.shader.code)}>Save as custom</Button>
               </div>
             </div>
           );

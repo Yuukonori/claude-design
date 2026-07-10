@@ -9,6 +9,10 @@ function pvKind(n) {
 }
 const WEIGHT = { regular: 400, medium: 500, semibold: 600, bold: 700 };
 const FONT = { 'Grotesk (UI)': 'var(--font-sans)', 'Serif display': 'var(--font-serif-display)', 'Mono': 'var(--font-mono)', 'System': 'system-ui, sans-serif' };
+// Resolve a node's font family to a CSS value: a built-in maps to its token; a custom uploaded font
+// (registered in window.__latticeFonts) maps to its own quoted family name; anything else -> null so
+// callers fall back to var(--font-sans).
+function ff(name) { return FONT[name] || ((window.__latticeFonts || []).indexOf(name) !== -1 ? "'" + name + "'" : null); }
 const BTN_FS = { sm: 12, md: 13, lg: 14 };
 // Typography → Align, mapped onto the flex axis for kinds whose content is a single child.
 const JUSTIFY = { left: 'flex-start', center: 'center', right: 'flex-end', justify: 'flex-start' };
@@ -28,7 +32,7 @@ function textStyle(node, kind) {
   const align = node.textAlign || 'left';
   return {
     color: node.textColor || (node.fillColor ? '#000' : 'var(--text-primary)'),
-    fontFamily: FONT[node.fontFamily] || (kind === 'heading' ? 'var(--font-serif-display)' : 'var(--font-sans)'),
+    fontFamily: ff(node.fontFamily) || (kind === 'heading' ? 'var(--font-serif-display)' : 'var(--font-sans)'),
     fontSize: fs, fontWeight: WEIGHT[node.fontWeight] || (kind === 'heading' ? 600 : 400),
     lineHeight: node.lineHeight ?? 1.4, letterSpacing: (node.letterSpacing ?? 0) + 'px',
     textTransform: node.textTransform && node.textTransform !== 'none' ? node.textTransform : undefined,
@@ -55,6 +59,23 @@ function ShadowedText({ node, type, shadowType, children }) {
 function LIcon({ name, ...o }) {
   if (!name) return null;
   return <i data-lt-icon data-lucide={name} style={window.iconStyle ? window.iconStyle(o) : { width: o.size, height: o.size }}></i>;
+}
+
+// Resolve any icon slot to an element, priority: pasted SVG > image/asset > Lucide glyph. `o` carries
+// the shared size/color/stroke/rotate/flip/opacity (see iconStyle). An inline SVG is tintable via
+// `color` (currentColor); an <img> asset keeps its own colors but still honors size/opacity/transform.
+function IconGlyph({ svg, src, name, o }) {
+  o = o || {};
+  const gs = window.iconStyle ? window.iconStyle(o) : { width: o.size, height: o.size };
+  if (svg) return <span data-lt-icon style={{ display: 'inline-flex', ...gs }} dangerouslySetInnerHTML={{ __html: svg }} />;
+  if (src) {
+    const url = window.resolveAssetSrc ? window.resolveAssetSrc(src) : src;
+    const st = { width: o.size, height: o.size, objectFit: 'contain' };
+    if (gs.opacity != null) st.opacity = gs.opacity;
+    if (gs.transform) st.transform = gs.transform;
+    return <img src={url} alt="" style={st} />;
+  }
+  return name ? <LIcon name={name} {...o} /> : null;
 }
 
 const INPUT_SIZE = { sm: { fs: 12, px: 8 }, md: { fs: 13, px: 10 }, lg: { fs: 14, px: 12 } };
@@ -138,7 +159,7 @@ function InputField({ node, tfx, fill }) {
           flex: 1, minWidth: 0, height: '100%', border: 0, outline: 'none', background: 'transparent',
           color: node.textColor || 'var(--text-primary)',
           '--lt-placeholder': node.placeholderColor || node.textColor || undefined,
-          fontFamily: FONT[node.fontFamily] || 'var(--font-sans)',
+          fontFamily: ff(node.fontFamily) || 'var(--font-sans)',
           fontSize: node.fontSize || sz.fs,
           textAlign: node.textAlign || undefined,
           cursor: node.disabled ? 'not-allowed' : 'auto',
@@ -158,13 +179,13 @@ function InputField({ node, tfx, fill }) {
   return (
     <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column', gap: 4, boxSizing: 'border-box' }}>
       {label && (
-        <span style={{ fontSize: 12, fontWeight: 500, color: node.textColor || 'var(--text-secondary)', fontFamily: FONT[node.fontFamily] || 'var(--font-sans)', flex: 'none' }}>
+        <span style={{ fontSize: 12, fontWeight: 500, color: node.textColor || 'var(--text-secondary)', fontFamily: ff(node.fontFamily) || 'var(--font-sans)', flex: 'none' }}>
           {label}{node.required && <span style={{ color: 'var(--status-danger-fg)' }}> *</span>}
         </span>
       )}
       {field}
       {note && (
-        <span style={{ fontSize: 11.5, color: invalid && node.errorText ? 'var(--status-danger-fg)' : 'var(--text-muted)', fontFamily: FONT[node.fontFamily] || 'var(--font-sans)', flex: 'none' }}>{note}</span>
+        <span style={{ fontSize: 11.5, color: invalid && node.errorText ? 'var(--status-danger-fg)' : 'var(--text-muted)', fontFamily: ff(node.fontFamily) || 'var(--font-sans)', flex: 'none' }}>{note}</span>
       )}
     </div>
   );
@@ -248,21 +269,23 @@ function pvRender(node) {
 
   if (kind === 'button') {
     const v = node.variant || 'solid';
+    // A shader fill replaces the button's background — keep it transparent so the animated layer
+    // behind (see PreviewNode) shows through, with only the label/border on top.
+    const shaderOn = node.shader && node.shader.on;
     const palette = {
-      solid: { background: fill || 'var(--action-solid)', color: solidFill ? '#000' : 'var(--action-solid-text)', border: '1px solid ' + (solidFill || (fill ? 'transparent' : 'var(--action-solid)')) },
-      outline: { background: fill || 'transparent', color: 'var(--text-primary)', border: '1px solid var(--border-default)' },
-      ghost: { background: fill || 'transparent', color: 'var(--text-secondary)', border: '1px solid transparent' },
-      danger: { background: fill || 'transparent', color: 'var(--status-danger-fg)', border: '1px solid var(--status-danger-fg)' },
+      solid: { background: shaderOn ? 'transparent' : (fill || 'var(--action-solid)'), color: solidFill ? '#000' : 'var(--action-solid-text)', border: '1px solid ' + (shaderOn ? 'transparent' : (solidFill || (fill ? 'transparent' : 'var(--action-solid)'))) },
+      outline: { background: shaderOn ? 'transparent' : (fill || 'transparent'), color: 'var(--text-primary)', border: '1px solid var(--border-default)' },
+      ghost: { background: shaderOn ? 'transparent' : (fill || 'transparent'), color: 'var(--text-secondary)', border: '1px solid transparent' },
+      danger: { background: shaderOn ? 'transparent' : (fill || 'transparent'), color: 'var(--status-danger-fg)', border: '1px solid var(--status-danger-fg)' },
     }[v];
     // Icon placement: left (default), right, or icon-only (label hidden).
     const pos = node.btnIconPos || 'left';
-    const iconEl = node.btnIcon ? (
-      <LIcon name={node.btnIcon} size={node.btnIconSize || 15} color={node.btnIconColor}
-        stroke={node.btnIconStroke} rotate={node.btnIconRotate}
-        flipH={node.btnIconFlipH} flipV={node.btnIconFlipV} opacity={node.btnIconOpacity} />
+    const iconEl = (node.btnIconSvg || node.btnIconSrc || node.btnIcon) ? (
+      <IconGlyph svg={node.btnIconSvg} src={node.btnIconSrc} name={node.btnIcon}
+        o={{ size: node.btnIconSize || 15, color: node.btnIconColor, stroke: node.btnIconStroke, rotate: node.btnIconRotate, flipH: node.btnIconFlipH, flipV: node.btnIconFlipV, opacity: node.btnIconOpacity }} />
     ) : null;
     return (
-      <button type="button" disabled={!!node.disabled} style={{ ...box, ...palette, display: 'inline-flex', alignItems: 'center', justifyContent: justifyFor(node.textAlign, 'center'), gap: node.btnIconGap ?? 7, fontFamily: FONT[node.fontFamily] || 'var(--font-sans)', fontWeight: WEIGHT[node.fontWeight] || 500, fontSize: node.fontSize || BTN_FS[node.btnSize] || 13, cursor: node.disabled ? 'not-allowed' : 'pointer', opacity: node.disabled ? 0.45 : 1, ...tfx }}>
+      <button type="button" disabled={!!node.disabled} style={{ ...box, ...palette, display: 'inline-flex', alignItems: 'center', justifyContent: justifyFor(node.textAlign, 'center'), gap: node.btnIconGap ?? 7, fontFamily: ff(node.fontFamily) || 'var(--font-sans)', fontWeight: WEIGHT[node.fontWeight] || 500, fontSize: node.fontSize || BTN_FS[node.btnSize] || 13, cursor: node.disabled ? 'not-allowed' : 'pointer', opacity: node.disabled ? 0.45 : 1, ...tfx }}>
         {pos !== 'right' && iconEl}{pos !== 'only' && (node.label ?? node.name)}{pos === 'right' && iconEl}
       </button>
     );
@@ -282,10 +305,12 @@ function pvRender(node) {
   }
   if (kind === 'icon') {
     const VALIGN = { top: 'flex-start', middle: 'center', bottom: 'flex-end' };
+    const sz = node.iconSize || 24;
+    // Priority: pasted SVG markup > internal-path / URL image > Lucide glyph.
+    const glyph = <IconGlyph svg={node.iconSvg} src={node.iconSrc} name={node.iconName || 'star'}
+      o={{ size: sz, color: node.textColor || 'var(--text-primary)', stroke: node.iconStroke, rotate: node.iconRotate, flipH: node.iconFlipH, flipV: node.iconFlipV, opacity: node.iconOpacity }} />;
     return <div style={{ ...box, display: 'flex', alignItems: VALIGN[node.iconVAlign] || 'center', justifyContent: justifyFor(node.iconAlign, 'center') }}>
-      <LIcon name={node.iconName || 'star'} size={node.iconSize || 24} color={node.textColor || 'var(--text-primary)'}
-        stroke={node.iconStroke} rotate={node.iconRotate}
-        flipH={node.iconFlipH} flipV={node.iconFlipV} opacity={node.iconOpacity} />
+      {glyph}
     </div>;
   }
   if (kind === 'link') {
@@ -303,7 +328,7 @@ function pvRender(node) {
   if (kind === 'list') {
     const items = String(node.itemsText || 'First item\nSecond item\nThird item').split('\n').filter(s => s.trim());
     const Tag = node.ordered ? 'ol' : 'ul';
-    return <Tag style={{ ...box, margin: 0, paddingLeft: 20, overflow: 'auto', color: node.textColor || 'var(--text-secondary)', fontFamily: FONT[node.fontFamily] || 'var(--font-sans)', fontSize: node.fontSize || 13, lineHeight: node.lineHeight ?? 1.7, textAlign: node.textAlign || undefined, ...tfx }}>{items.map((it, i) => <li key={i}>{it}</li>)}</Tag>;
+    return <Tag style={{ ...box, margin: 0, paddingLeft: 20, overflow: 'auto', color: node.textColor || 'var(--text-secondary)', fontFamily: ff(node.fontFamily) || 'var(--font-sans)', fontSize: node.fontSize || 13, lineHeight: node.lineHeight ?? 1.7, textAlign: node.textAlign || undefined, ...tfx }}>{items.map((it, i) => <li key={i}>{it}</li>)}</Tag>;
   }
   if (kind === 'progress') {
     const v = Math.max(0, Math.min(100, node.value ?? 60));
@@ -353,7 +378,7 @@ function pvRender(node) {
         disabled={!!node.disabled} readOnly={!!node.readOnly} rows={node.rows || 3}
         style={{ width: '100%', flex: 1, minHeight: 0, resize: 'none', boxSizing: 'border-box', border: bd, borderRadius: radius,
           background: fill || 'var(--surface-inset)', color: node.textColor || 'var(--text-primary)',
-          fontFamily: FONT[node.fontFamily] || 'var(--font-sans)', fontSize: node.fontSize || sz.fs, lineHeight: node.lineHeight ?? 1.5,
+          fontFamily: ff(node.fontFamily) || 'var(--font-sans)', fontSize: node.fontSize || sz.fs, lineHeight: node.lineHeight ?? 1.5,
           fontWeight: WEIGHT[node.fontWeight] || 400, letterSpacing: (node.letterSpacing ?? 0) + 'px',
           textTransform: node.textTransform && node.textTransform !== 'none' ? node.textTransform : undefined,
           padding: `${sz.px}px`, outline: 'none', opacity: node.disabled ? 0.5 : 1, ...tfx }} />
@@ -361,7 +386,7 @@ function pvRender(node) {
     if (!node.fieldLabel && !node.helperText) return <div style={{ width: '100%', height: '100%', display: 'flex' }}>{area}</div>;
     return (
       <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column', gap: 4, boxSizing: 'border-box' }}>
-        {node.fieldLabel && <span style={{ fontSize: 12, fontWeight: 500, color: node.textColor || 'var(--text-secondary)', fontFamily: FONT[node.fontFamily] || 'var(--font-sans)', flex: 'none' }}>{node.fieldLabel}</span>}
+        {node.fieldLabel && <span style={{ fontSize: 12, fontWeight: 500, color: node.textColor || 'var(--text-secondary)', fontFamily: ff(node.fontFamily) || 'var(--font-sans)', flex: 'none' }}>{node.fieldLabel}</span>}
         {area}
         {node.helperText && <span style={{ fontSize: 11.5, color: 'var(--text-muted)', flex: 'none' }}>{node.helperText}</span>}
       </div>
@@ -379,7 +404,7 @@ function pvRender(node) {
     return (
       <div style={{ ...box, display: 'flex', flexDirection: horiz ? 'row' : 'column', flexWrap: 'wrap', alignContent: 'center',
         gap: horiz ? 16 : 10, justifyContent: justifyFor(node.textAlign, 'left'), color: node.textColor || 'var(--text-secondary)',
-        fontFamily: FONT[node.fontFamily] || 'var(--font-sans)', fontSize: node.fontSize || 14, fontWeight: WEIGHT[node.fontWeight] || 400,
+        fontFamily: ff(node.fontFamily) || 'var(--font-sans)', fontSize: node.fontSize || 14, fontWeight: WEIGHT[node.fontWeight] || 400,
         letterSpacing: (node.letterSpacing ?? 0) + 'px', textTransform: node.textTransform && node.textTransform !== 'none' ? node.textTransform : undefined, ...tfx }}>
         {opts.map((o, i) => {
           const on = selSet.has(i);
@@ -427,7 +452,7 @@ function pvRender(node) {
     const sep = node.separator || '/';
     return (
       <div style={{ ...box, display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 7, color: node.textColor || 'var(--text-muted)',
-        fontFamily: FONT[node.fontFamily] || 'var(--font-sans)', fontSize: node.fontSize || 13, fontWeight: WEIGHT[node.fontWeight] || 400,
+        fontFamily: ff(node.fontFamily) || 'var(--font-sans)', fontSize: node.fontSize || 13, fontWeight: WEIGHT[node.fontWeight] || 400,
         letterSpacing: (node.letterSpacing ?? 0) + 'px', textTransform: node.textTransform && node.textTransform !== 'none' ? node.textTransform : undefined,
         justifyContent: justifyFor(node.textAlign, 'left'), ...tfx }}>
         {items.map((it, i) => (
@@ -445,7 +470,7 @@ function pvRender(node) {
     const fs = node.fontSize || 13.5;
     return (
       <div style={{ ...box, display: 'flex', gap: 10, padding: '12px 14px', background: fill || 'var(--surface-card)', borderLeft: `3px solid ${c}`,
-        fontFamily: FONT[node.fontFamily] || 'var(--font-sans)', ...tfx }}>
+        fontFamily: ff(node.fontFamily) || 'var(--font-sans)', ...tfx }}>
         {node.alertIcon && <LIcon name={node.alertIcon} size={18} color={c} />}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
           {node.label && <span style={{ fontWeight: 600, color: node.textColor || 'var(--text-primary)', fontSize: fs }}>{node.label}</span>}
@@ -459,7 +484,7 @@ function pvRender(node) {
     const rows = String(node.tableRows || '').split('\n').map(r => r.split(',').map(c => c.trim())).filter(r => r.some(Boolean));
     const fs = node.fontSize || 12.5;
     return (
-      <div style={{ ...box, overflow: 'auto', fontFamily: FONT[node.fontFamily] || 'var(--font-sans)', background: fill || 'transparent', ...tfx }}>
+      <div style={{ ...box, overflow: 'auto', fontFamily: ff(node.fontFamily) || 'var(--font-sans)', background: fill || 'transparent', ...tfx }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: fs, color: node.textColor || 'var(--text-secondary)' }}>
           {cols.length > 0 && (
             <thead><tr>{cols.map((c, i) => <th key={i} style={{ textAlign: 'left', padding: '7px 10px', borderBottom: '1px solid var(--border-default)', color: node.textColor || 'var(--text-primary)', fontWeight: 600, whiteSpace: 'nowrap' }}>{c}</th>)}</tr></thead>
@@ -477,9 +502,9 @@ function pvRender(node) {
     const trend = node.statTrend || 'up';
     const tc = trend === 'up' ? 'var(--green-base)' : trend === 'down' ? 'var(--status-danger-fg)' : 'var(--text-muted)';
     return (
-      <div style={{ ...box, display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 3, padding: '4px 2px', background: fill || 'transparent', fontFamily: FONT[node.fontFamily] || 'var(--font-sans)', ...tfx }}>
+      <div style={{ ...box, display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 3, padding: '4px 2px', background: fill || 'transparent', fontFamily: ff(node.fontFamily) || 'var(--font-sans)', ...tfx }}>
         {node.label && <span style={{ fontSize: 12, color: node.textColor || 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{node.label}</span>}
-        <span style={{ fontSize: node.fontSize || 26, fontWeight: 600, color: node.textColor || 'var(--text-primary)', fontFamily: FONT[node.fontFamily] || 'var(--font-serif-display)', lineHeight: 1.1 }}>{node.statValue || '—'}</span>
+        <span style={{ fontSize: node.fontSize || 26, fontWeight: 600, color: node.textColor || 'var(--text-primary)', fontFamily: ff(node.fontFamily) || 'var(--font-serif-display)', lineHeight: 1.1 }}>{node.statValue || '—'}</span>
         {node.statDelta && (
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 12, color: tc }}>
             {trend !== 'none' && <LIcon name={trend === 'up' ? 'trending-up' : 'trending-down'} size={13} color={tc} />}
@@ -523,14 +548,25 @@ window.PreviewNode = PreviewNode;
 
 function hasHover(h) { return h && (h.fill || h.textColor || h.borderColor || (h.scale && h.scale !== 100) || (h.opacity != null && h.opacity !== 100)); }
 
-function PreviewCanvas({ nodes, connections, artboard, device, onAction, runtime = null, runtimeProps = {} }) {
+function PreviewCanvas({ nodes, connections, artboard, device, onAction, runtime = null, runtimeProps = {}, pageTimeline = null }) {
   const [override, setOverride] = React.useState({});
   // Workflow "Set property" nodes stash live overrides here (nodeId -> patch), applied on render.
   const applyRt = (n) => runtimeProps[n.id] ? { ...n, ...runtimeProps[n.id] } : n;
-  // Live interaction state: per-node hover phase, the currently-pressed node, and sticky toggles.
-  const [phase, setPhase] = React.useState({});   // nodeId -> 'hoverOn' | 'hoverOff'
-  const [pressId, setPressId] = React.useState(null);
+  // Live interaction state, per node id: whether it's hovered, the active pointer interaction
+  // (press/hold/drag), sticky click toggles, and momentary pulses (click/right-click/drop/hover-off).
+  const [hover, setHover] = React.useState({});     // nodeId -> bool
+  const [pointer, setPointer] = React.useState({}); // nodeId -> 'press' | 'hold' | 'drag'
   const [toggled, setToggled] = React.useState({}); // nodeId -> bool (clickMode 'toggle')
+  const [pulse, setPulse] = React.useState({});     // nodeId -> { key } momentary reaction
+  const [, setTick] = React.useState(0);            // ticks each rAF while a track animation plays
+  // Time-based playback clocks for track animations bound to triggers. nodeId -> {stateId,start,dur,loop,sustain}
+  const clocksRef = React.useRef({});
+  const idleRef = React.useRef({});                 // nodeId -> {stateId,start,dur} looping idle track-anims
+  const sceneTimeRef = React.useRef(0);             // current time (ms) of the page scene timeline
+  const sceneRafRef = React.useRef(0);
+  const rafRef = React.useRef(0);
+  const holdTimersRef = React.useRef({});           // nodeId -> setTimeout id (press → hold threshold)
+  const pulseTimersRef = React.useRef({});          // nodeId -> setTimeout id (clear a momentary pulse)
   const rootRef = React.useRef(null);
   const childIds = new Set(connections.filter(c => c.kind === 'child').map(c => c.from));
 
@@ -575,16 +611,119 @@ function PreviewCanvas({ nodes, connections, artboard, device, onAction, runtime
     return () => timers.forEach(clearTimeout);
   }, [animSig]); // eslint-disable-line
 
-  // Which interaction state is a node currently showing? Disabled states fall back to Default.
-  const stateOf = (n) => {
-    if (!(n.states || n.hover)) return 'default';
-    const toggleMode = (n.clickMode || 'toggle') === 'toggle';
-    let s = phase[n.id] || 'default';
-    if (toggleMode && toggled[n.id]) s = 'clickOn';
-    else if (!toggleMode && pressId === n.id) s = 'clickOn';
-    if (s !== 'default' && window.stateEnabled && !window.stateEnabled(n, s)) return 'default';
-    return s;
+  // --- Track-animation clocks: a rAF loop ticks re-renders while any bound animation is playing. ---
+  const ensureRaf = () => {
+    if (rafRef.current) return;
+    const loop = () => {
+      const clocks = clocksRef.current;
+      const ids = Object.keys(clocks);
+      if (!ids.length && !Object.keys(idleRef.current).length) { rafRef.current = 0; return; }
+      const now = performance.now();
+      // Retire momentary animations (no loop / no sustain) once they've run their duration → revert.
+      ids.forEach(id => { const c = clocks[id]; if (!c.loop && !c.sustain && now - c.start >= c.dur) delete clocks[id]; });
+      setTick(t => (t + 1) % 1000000);
+      rafRef.current = requestAnimationFrame(loop);
+    };
+    rafRef.current = requestAnimationFrame(loop);
   };
+  const startClock = (id, stt, opts) => {
+    if (!stt) return;
+    clocksRef.current[id] = { stateId: stt.id, start: performance.now(), dur: Math.max(1, window.stateDuration ? window.stateDuration(stt) : 400), loop: !!(opts && opts.loop), sustain: !!(opts && opts.sustain) };
+    ensureRaf();
+  };
+  const stopClock = (id) => { delete clocksRef.current[id]; };
+  React.useEffect(() => () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); Object.values(holdTimersRef.current).forEach(clearTimeout); Object.values(pulseTimersRef.current).forEach(clearTimeout); }, []);
+
+  // --- Which interaction trigger is a node currently showing, and its resolved pose. -------------
+  // A trigger is "usable" only if it's enabled and actually carries content (a static override or a
+  // bound animation). Priority when several could apply: momentary pulse > drag > hold > press >
+  // sticky click > hover. Anything unusable falls through, ultimately to Default.
+  const usable = (n, key) => key && key !== 'default' && (!window.stateEnabled || window.stateEnabled(n, key)) && (!window.stateHasOverrides || window.stateHasOverrides(n, key));
+  const animOf = (n, key) => { const id = window.stateAnimId && window.stateAnimId(n, key); return id ? (n.customStates || []).find(c => c.id === id) : null; };
+  const sustainedTrigger = (n) => {
+    const p = pointer[n.id];
+    if (p === 'drag' && usable(n, 'drag')) return 'drag';
+    if (p === 'hold' && usable(n, 'hold')) return 'hold';
+    if (p === 'press' && usable(n, 'press')) return 'press';
+    if ((n.clickMode || 'toggle') === 'toggle' && toggled[n.id] && usable(n, 'click')) return 'click';
+    if (hover[n.id] && usable(n, 'hoverOn')) return 'hoverOn';
+    return 'default';
+  };
+  const activeTrigger = (n) => { const pl = pulse[n.id]; if (pl && usable(n, pl.key)) return pl.key; return sustainedTrigger(n); };
+  // Start the clock for a sustained trigger's bound animation (hold freezes on its last key).
+  const startTriggerAnim = (n, key) => {
+    const stt = animOf(n, key);
+    if (!stt) return;
+    const sustain = key === 'hold' ? ((n.states && n.states.hold && n.states.hold.sustain) !== false) : false;
+    startClock(n.id, stt, { loop: key === 'hold' ? false : !!stt.loop, sustain });
+  };
+  // Fire a momentary reaction (click/right-click/drop/hover-off): play once, then auto-revert.
+  const firePulse = (n, key) => {
+    if (!usable(n, key)) return;
+    const stt = animOf(n, key);
+    const dur = stt ? (window.stateDuration ? window.stateDuration(stt) : 300) : (window.stateTiming ? window.stateTiming(n, key).dur : 150);
+    if (stt) startClock(n.id, stt, { loop: false, sustain: false });
+    setPulse(p => ({ ...p, [n.id]: { key } }));
+    clearTimeout(pulseTimersRef.current[n.id]);
+    pulseTimersRef.current[n.id] = setTimeout(() => setPulse(p => { const q = { ...p }; delete q[n.id]; return q; }), Math.max(80, dur) + 30);
+  };
+  // Resolve the node to its current pose: sample a bound animation over time, else merge the static
+  // override, else the base node.
+  const poseFor = (n) => {
+    const key = activeTrigger(n);
+    const stt = key !== 'default' ? animOf(n, key) : null;
+    if (stt) {
+      const clk = clocksRef.current[n.id];
+      let e;
+      if (clk && clk.stateId === stt.id) {
+        e = performance.now() - clk.start;
+        if (e >= clk.dur) e = clk.loop ? (clk.dur > 0 ? e % clk.dur : 0) : clk.dur;
+      } else { e = window.stateDuration ? window.stateDuration(stt) : 0; }
+      return { key, animing: true, rendered: window.poseAt ? window.poseAt(n, stt, e) : n };
+    }
+    if (key !== 'default') return { key, animing: false, rendered: window.mergeState ? window.mergeState(n, key) : n };
+    // No trigger active — play a looping idle track animation if the node has one.
+    const idle = idleRef.current[n.id];
+    if (idle) {
+      const ist = (n.customStates || []).find(c => c.id === idle.stateId);
+      if (ist) { const d = idle.dur || 1; const e = d > 0 ? (performance.now() - idle.start) % d : 0; return { key: 'default', animing: true, rendered: window.poseAt ? window.poseAt(n, ist, e) : n }; }
+    }
+    return { key: 'default', animing: false, rendered: n };
+  };
+  // A looping, enabled, track-based animation that isn't bound to any trigger auto-plays as "idle"
+  // (e.g. a loading spinner). Frame-based legacy loops keep using the animState() path above.
+  const idleAnimOf = (n) => {
+    const bound = new Set(Object.values(n.states || {}).map(s => s && s.animId).filter(Boolean));
+    return (n.customStates || []).find(c => (c.type || 'static') === 'anim' && c.loop && (c.tracks && c.tracks.length) && !bound.has(c.id) && (!window.stateEnabled || window.stateEnabled(n, c.id)));
+  };
+  const idleSig = nodes.map(n => { const c = idleAnimOf(n); return c ? n.id + ':' + c.id + ':' + (window.stateDuration ? window.stateDuration(c) : 0) : ''; }).join('|');
+  React.useEffect(() => {
+    const idle = {};
+    nodes.forEach(n => { const c = idleAnimOf(n); if (c) idle[n.id] = { stateId: c.id, start: performance.now(), dur: Math.max(1, window.stateDuration ? window.stateDuration(c) : 400) }; });
+    idleRef.current = idle;
+    if (Object.keys(idle).length) ensureRaf();
+  }, [idleSig]); // eslint-disable-line
+
+  // --- Page scene timeline: one clock drives many nodes' property tracks over the whole screen. -----
+  const sceneTL = pageTimeline && pageTimeline.on !== false && pageTimeline.autoplay !== false && (pageTimeline.tracks || []).length ? pageTimeline : null;
+  const sceneDur = sceneTL ? Math.max(1, sceneTL.duration || (window.tracksDuration ? window.tracksDuration(sceneTL.tracks) : 0)) : 0;
+  const sceneSig = sceneTL ? ((sceneTL.tracks || []).length + ':' + sceneDur + ':' + sceneTL.loop) : '';
+  React.useEffect(() => {
+    if (!sceneTL) { sceneTimeRef.current = 0; if (sceneRafRef.current) { cancelAnimationFrame(sceneRafRef.current); sceneRafRef.current = 0; } return; }
+    const start = performance.now();
+    const step = (now) => {
+      let e = now - start;
+      if (e >= sceneDur) { if (sceneTL.loop !== false) e = sceneDur > 0 ? e % sceneDur : 0; else e = sceneDur; }
+      sceneTimeRef.current = e;
+      setTick(t => (t + 1) % 1000000);
+      if (sceneTL.loop !== false || e < sceneDur) sceneRafRef.current = requestAnimationFrame(step);
+    };
+    sceneRafRef.current = requestAnimationFrame(step);
+    return () => { if (sceneRafRef.current) cancelAnimationFrame(sceneRafRef.current); };
+  }, [sceneSig]); // eslint-disable-line
+  // Overrides for one node from the scene timeline at the current scene time (or null).
+  const sceneOvOf = (n) => sceneTL ? window.sampleTracks((sceneTL.tracks || []).filter(tr => tr.nodeId === n.id), sceneTimeRef.current) : null;
+  const applyScene = (n) => { const ov = sceneTL ? sceneOvOf(n) : null; return ov && Object.keys(ov).length ? { ...n, ...ov } : n; };
 
   const dispatch = (action) => {
     if (!action) return;
@@ -601,18 +740,21 @@ function PreviewCanvas({ nodes, connections, artboard, device, onAction, runtime
     if (acts.length) { if (e) { e.preventDefault(); e.stopPropagation(); } acts.forEach(dispatch); }
   };
 
-  const visible = nodes.map(applyRt).filter(n => !n.hidden && !override[n.id]);
+  const hasScene = (n) => !!(sceneTL && (sceneTL.tracks || []).some(tr => tr.nodeId === n.id));
+  const visible = nodes.map(applyRt).map(applyScene).filter(n => !n.hidden && !override[n.id]);
   const W = artboard ? artboard.w : 1440, H = artboard ? artboard.h : 1024;
 
   // State overrides are applied by re-rendering the merged node (below); this only supplies the
   // transition so the change animates. Targets descendants too, since fill/scale/etc. live inside
   // PreviewNode. Timing comes from the *active* state, so entering and leaving can differ.
-  const stateCSS = visible.filter(n => n.states || n.hover || animState(n)).map(n => {
+  const stateCSS = visible.filter(n => n.states || n.hover || animState(n) || idleAnimOf(n) || hasScene(n)).map(n => {
     const cs = animState(n);
-    let dur, ease;
-    if (cs) { const fi = frameIdx[n.id] || 0; const fr = cs.frames[fi]; dur = (fr && fr.dur) || 400; ease = (fr && fr.ease) || 'linear'; }
-    else { const t = window.stateTiming ? window.stateTiming(n, stateOf(n)) : { dur: 150, ease: 'ease-out' }; dur = t.dur; ease = t.ease; }
-    return `[data-nid="${n.id}"],[data-nid="${n.id}"] *{transition:all ${dur}ms ${ease}}`;
+    if (cs) { const fi = frameIdx[n.id] || 0; const fr = cs.frames[fi]; const dur = (fr && fr.dur) || 400; const ease = (fr && fr.ease) || 'linear'; return `[data-nid="${n.id}"],[data-nid="${n.id}"] *{transition:all ${dur}ms ${ease}}`; }
+    // A track animation samples every frame in JS, so suppress CSS transitions while it plays; a
+    // static state tweens via CSS using the active trigger's timing.
+    if (clocksRef.current[n.id] || idleAnimOf(n) || hasScene(n)) return `[data-nid="${n.id}"],[data-nid="${n.id}"] *{transition:none}`;
+    const t = window.stateTiming ? window.stateTiming(n, activeTrigger(n)) : { dur: 150, ease: 'ease-out' };
+    return `[data-nid="${n.id}"],[data-nid="${n.id}"] *{transition:all ${t.dur}ms ${t.ease}}`;
   }).join('\n');
 
   // Fit the artboard, centred, whenever its size changes (mount + device switch).
@@ -682,23 +824,51 @@ function PreviewCanvas({ nodes, connections, artboard, device, onAction, runtime
             // start-flash, but DON'T hold the last keyframe after. Entrance keyframes end at the
             // element's natural state, so releasing to base looks identical.
             const animation = a && a.type && a.type !== 'none' ? `lt-${a.type} ${a.duration ?? 400}ms ${a.easing || 'ease-out'} ${a.delay ?? 0}ms backwards` : undefined;
-            const cs = animState(n);
+            const cs = animState(n);                             // legacy frame-based auto-play (idle)
             const hasStates = !!(n.states || n.hover) && !cs;
             const toggleMode = (n.clickMode || 'toggle') === 'toggle';
-            const active = cs ? 'default' : stateOf(n);
-            const rendered = cs ? (window.mergeFrame ? window.mergeFrame(n, cs.frames[frameIdx[n.id] || 0]) : n)
-              : (active !== 'default' && window.mergeState) ? window.mergeState(n, active) : n;
-            const hasClickState = hasStates && ((n.states && n.states.clickOn) || false);
-            const clickable = hasClickState || (n.actions || []).some(x => (x.trigger || 'click') === 'click');
-            const onClick = (e) => { if (hasStates && toggleMode) setToggled(t => ({ ...t, [n.id]: !t[n.id] })); run(n, 'click')(e); };
-            const onEnter = (e) => { if (hasStates) setPhase(p => ({ ...p, [n.id]: 'hoverOn' })); run(n, 'hover')(e); };
-            const onLeave = () => { if (!hasStates) return; setPhase(p => ({ ...p, [n.id]: 'hoverOff' })); if (!toggleMode) setPressId(id => id === n.id ? null : id); };
-            const onDown = () => { if (hasStates && !toggleMode) setPressId(n.id); };
-            const onUp = () => { if (hasStates && !toggleMode) setPressId(id => id === n.id ? null : id); };
+            // Pose: legacy card frames, else the resolved trigger pose (static merge or sampled anim).
+            const rendered = cs ? (window.mergeFrame ? window.mergeFrame(n, cs.frames[frameIdx[n.id] || 0]) : n) : poseFor(n).rendered;
+            const clickable = hasStates && (usable(n, 'click') || usable(n, 'press') || usable(n, 'hold') || (n.actions || []).some(x => (x.trigger || 'click') === 'click'));
+            const dragEnabled = hasStates && (usable(n, 'drag') || usable(n, 'drop'));
+
+            // Pointer / hover / click machine driving the trigger states above.
+            const onEnter = (e) => { if (hasStates) { setHover(h => ({ ...h, [n.id]: true })); startTriggerAnim(n, 'hoverOn'); } run(n, 'hover')(e); };
+            const onLeave = () => {
+              if (!hasStates) return;
+              setHover(h => ({ ...h, [n.id]: false }));
+              clearTimeout(holdTimersRef.current[n.id]);
+              setPointer(p => { const q = { ...p }; delete q[n.id]; return q; });
+              stopClock(n.id);
+              firePulse(n, 'hoverOff');
+            };
+            const onDown = (e) => {
+              if (!hasStates || e.button !== 0) return;
+              setPointer(p => ({ ...p, [n.id]: 'press' }));
+              if (animOf(n, 'press')) firePulse(n, 'press'); else startTriggerAnim(n, 'press'); // anim = momentary pop, static = sustained depress
+              const holdMs = (n.states && n.states.hold && n.states.hold.holdMs) ?? 250;
+              clearTimeout(holdTimersRef.current[n.id]);
+              holdTimersRef.current[n.id] = setTimeout(() => { setPointer(p => ({ ...p, [n.id]: 'hold' })); stopClock(n.id); startTriggerAnim(n, 'hold'); }, holdMs);
+            };
+            const onUp = () => {
+              if (!hasStates) return;
+              clearTimeout(holdTimersRef.current[n.id]);
+              setPointer(p => { const q = { ...p }; delete q[n.id]; return q; });
+              stopClock(n.id);
+            };
+            const onClick = (e) => {
+              if (hasStates) { if (toggleMode) setToggled(t => ({ ...t, [n.id]: !t[n.id] })); else firePulse(n, 'click'); }
+              run(n, 'click')(e);
+            };
+            const onCtx = (e) => { if (hasStates && usable(n, 'rightClick')) { e.preventDefault(); firePulse(n, 'rightClick'); } };
+            const onDragStart = () => { if (dragEnabled) { clearTimeout(holdTimersRef.current[n.id]); setPointer(p => ({ ...p, [n.id]: 'drag' })); startTriggerAnim(n, 'drag'); } };
+            const onDragEnd = () => { if (dragEnabled) { setPointer(p => { const q = { ...p }; delete q[n.id]; return q; }); stopClock(n.id); firePulse(n, 'drop'); } };
             return (
-              <div key={n.id} data-nid={n.id}
-                onClick={onClick} onMouseEnter={onEnter} onMouseLeave={onLeave} onMouseDown={onDown} onMouseUp={onUp}
-                style={{ position: 'absolute', left: n.x, top: n.y, width: n.w, height: n.h, animation, cursor: clickable ? 'pointer' : 'default', overflow: n.clipContent ? 'hidden' : 'visible' }}>
+              <div key={n.id} data-nid={n.id} draggable={dragEnabled || undefined}
+                onClick={onClick} onContextMenu={onCtx}
+                onMouseEnter={onEnter} onMouseLeave={onLeave} onMouseDown={onDown} onMouseUp={onUp}
+                onDragStart={onDragStart} onDragEnd={onDragEnd}
+                style={{ position: 'absolute', left: n.x, top: n.y, width: n.w, height: n.h, animation, cursor: clickable ? 'pointer' : (dragEnabled ? 'grab' : 'default'), overflow: n.clipContent ? 'hidden' : 'visible' }}>
                 <PreviewNode node={rendered} />
               </div>
             );

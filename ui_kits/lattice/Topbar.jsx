@@ -181,7 +181,7 @@ window.Topbar = Topbar;
 
 // VS Code-style page tabs — rendered above the canvas column only (not across the side panels).
 // Also hosts transient "animation editor" tabs (film icon) that open beside the page tabs.
-function PageTabs({ pages = [], activePageId, onSelectPage, onAddPage, onRenamePage, onDeletePage, animTabs = [], activeAnimId, onSelectAnim, onCloseAnim }) {
+function PageTabs({ pages = [], activePageId, onSelectPage, onAddPage, onRenamePage, onDeletePage, animTabs = [], activeAnimId, onSelectAnim, onCloseAnim, onTearTab, onOpenSceneTimeline, sceneActive = false }) {
   const { Tooltip } = window.LatticeDesignSystem_e801cb;
   const [editId, setEditId] = React.useState(null);
   const [draft, setDraft] = React.useState('');
@@ -200,6 +200,7 @@ function PageTabs({ pages = [], activePageId, onSelectPage, onAddPage, onRenameP
           const showClose = pages.length > 1 && (active || hovered) && !editing;
           return (
             <div key={p.id}
+              onMouseDown={e => { if (!editing && onTearTab) onTearTab({ type: 'page', pageId: p.id }, e); }}
               onClick={() => { if (!editing) onSelectPage(p.id); }}
               onDoubleClick={() => { if (onRenamePage) { setEditId(p.id); setDraft(p.name); } }}
               onMouseEnter={() => setHoverId(p.id)}
@@ -230,6 +231,7 @@ function PageTabs({ pages = [], activePageId, onSelectPage, onAddPage, onRenameP
           const hovered = hoverId === t.id;
           return (
             <div key={t.id}
+              onMouseDown={e => { if (onTearTab) onTearTab({ type: 'anim', animTabId: t.id }, e); }}
               onClick={() => onSelectAnim && onSelectAnim(t.id)}
               onMouseEnter={() => setHoverId(t.id)}
               onMouseLeave={() => setHoverId(h => (h === t.id ? null : h))}
@@ -246,6 +248,14 @@ function PageTabs({ pages = [], activePageId, onSelectPage, onAddPage, onRenameP
           );
         })}
       </div>
+      {onOpenSceneTimeline && (
+        <Tooltip label="Scene timeline — animate this page">
+          <button type="button" title="Scene timeline" onClick={onOpenSceneTimeline}
+            style={{ ...pageAddStyle, ...(sceneActive ? { color: 'var(--blue-base)', background: 'var(--surface-hover)' } : null) }}>
+            <i data-lucide="clapperboard" style={{ width: 14, height: 14 }}></i>
+          </button>
+        </Tooltip>
+      )}
       {onAddPage && (
         <Tooltip label="New page">
           <button type="button" title="New page" onClick={onAddPage} style={pageAddStyle}>

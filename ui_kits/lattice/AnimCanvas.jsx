@@ -10,8 +10,8 @@
 // with the ‹ › header buttons. "Tidy up" drops `bx/by` and re-flows the row.
 // The board pans (middle-drag / space+drag) and zooms (ctrl/⌘ + wheel) like the design canvas.
 const EASES = ['linear', 'ease-out', 'ease-in-out', 'ease-in'];
-const CARD_W = 204, CARD_H = 234, HEAD_H = 30, GAP_X = 150;
-const autoX = (i) => i * (CARD_W + GAP_X);
+const KF_W = 204, KF_H = 234, HEAD_H = 30, GAP_X = 150;
+const autoX = (i) => i * (KF_W + GAP_X);
 
 function AnimCanvas({ node, state, activeFrame = 0, onSelectFrame, onAddFrame, onDeleteFrame, onUpdateFrame, onUpdateState, onReorderFrame, onTidyUp }) {
   const { Switch } = window.LatticeDesignSystem_e801cb;
@@ -39,7 +39,7 @@ function AnimCanvas({ node, state, activeFrame = 0, onSelectFrame, onAddFrame, o
   React.useEffect(() => {
     if (didInit.current || !vpRef.current) return;
     const r = vpRef.current.getBoundingClientRect();
-    setV({ x: 40, y: Math.max(24, Math.round((r.height - CARD_H) / 2)), z: 1 });
+    setV({ x: 40, y: Math.max(24, Math.round((r.height - KF_H) / 2)), z: 1 });
     didInit.current = true;
   }, []);
 
@@ -113,7 +113,7 @@ function AnimCanvas({ node, state, activeFrame = 0, onSelectFrame, onAddFrame, o
   };
 
   const bw = Math.max(1, node.w || 160), bh = Math.max(1, node.h || 120);
-  const bodyW = CARD_W - 2, bodyH = CARD_H - 2 - HEAD_H;
+  const bodyW = KF_W - 2, bodyH = KF_H - 2 - HEAD_H;
 
   const card = (f, i) => {
     const pose = window.mergeFrame ? window.mergeFrame(node, f) : node;
@@ -127,7 +127,7 @@ function AnimCanvas({ node, state, activeFrame = 0, onSelectFrame, onAddFrame, o
         onMouseDown={startCardDrag(i, f)}
         onClick={() => { if (!movedRef.current && onSelectFrame) onSelectFrame(i); }}
         style={{
-          position: 'absolute', left: p.x, top: p.y, width: CARD_W, height: CARD_H, boxSizing: 'border-box',
+          position: 'absolute', left: p.x, top: p.y, width: KF_W, height: KF_H, boxSizing: 'border-box',
           display: 'flex', flexDirection: 'column', userSelect: 'none',
           cursor: dragRef.current && dragRef.current.i === i ? 'grabbing' : 'grab',
           border: '1px solid ' + (active ? 'var(--blue-base)' : 'var(--border-default)'),
@@ -163,8 +163,8 @@ function AnimCanvas({ node, state, activeFrame = 0, onSelectFrame, onAddFrame, o
   // Connector i joins card i-1 → card i and owns the *incoming* frame's duration/easing.
   const connectorPath = (i) => {
     const a = pts[i - 1], b = pts[i];
-    const x1 = a.x + CARD_W, y1 = a.y + CARD_H / 2;
-    const x2 = b.x, y2 = b.y + CARD_H / 2;
+    const x1 = a.x + KF_W, y1 = a.y + KF_H / 2;
+    const x2 = b.x, y2 = b.y + KF_H / 2;
     const mx = (x1 + x2) / 2;
     return { d: `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`, cx: mx, cy: (y1 + y2) / 2 };
   };
@@ -187,7 +187,7 @@ function AnimCanvas({ node, state, activeFrame = 0, onSelectFrame, onAddFrame, o
     );
   };
 
-  const maxRight = pts.length ? Math.max(...pts.map(p => p.x + CARD_W)) : 0;
+  const maxRight = pts.length ? Math.max(...pts.map(p => p.x + KF_W)) : 0;
   const addPos = { x: pts.length ? maxRight + 44 : 0, y: pts.length ? pts[pts.length - 1].y : 0 };
   const freePlaced = frames.some(f => f.bx != null || f.by != null);
 
@@ -235,7 +235,7 @@ function AnimCanvas({ node, state, activeFrame = 0, onSelectFrame, onAddFrame, o
           )}
 
           <button type="button" title="Add keyframe (duplicate last)" onMouseDown={e => e.stopPropagation()} onClick={() => onAddFrame && onAddFrame()}
-            style={{ position: 'absolute', left: addPos.x, top: addPos.y, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8, width: 120, height: CARD_H, boxSizing: 'border-box', border: '1.5px dashed var(--border-strong)', borderRadius: 6, background: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer' }}>
+            style={{ position: 'absolute', left: addPos.x, top: addPos.y, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8, width: 120, height: KF_H, boxSizing: 'border-box', border: '1.5px dashed var(--border-strong)', borderRadius: 6, background: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer' }}>
             <i data-lucide="plus" style={{ width: 22, height: 22 }}></i>
             <span style={{ fontSize: 12 }}>Add keyframe</span>
           </button>

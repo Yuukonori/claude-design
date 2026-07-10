@@ -15,7 +15,7 @@ const SHAPE = new Set(['rect', 'ellipse', 'line', 'triangle', 'star', 'polygon',
 const BORDER_INTRINSIC = new Set(['input', 'textarea']);
 window.kindOf = kindOf;
 
-function Inspector({ node, onChange, onBaseChange, onRename, connections, onDelete, onDetach, onDuplicate, allNodes = [], onSetParent, responsive = true, palette = [], pages = [], workflows = [], variables = [], pageVars = [], editingState = 'default', onSetEditingState, singleSelected = true, onResetState, editingFrame = null, onSetEditingFrame, onAddCustomState, onUpdateCustomState, onDeleteCustomState, onAddFrame, onUpdateFrame, onDeleteFrame, frameEditing = false, onOpenAnimEditor, onSaveAsComponent, onEditShader, shaderPresets, width, assets = [], onAddAsset }) {
+function Inspector({ node, onChange, onBaseChange, onRename, connections, onDelete, onDetach, onDuplicate, allNodes = [], onSetParent, responsive = true, palette = [], pages = [], workflows = [], variables = [], pageVars = [], editingState = 'default', onSetEditingState, singleSelected = true, onResetState, editingFrame = null, onSetEditingFrame, onAddCustomState, onUpdateCustomState, onDeleteCustomState, onAddFrame, onUpdateFrame, onDeleteFrame, frameEditing = false, onOpenAnimEditor, onApplyPreset, onBindAnim, onSaveAsComponent, onEditShader, shaderPresets, width, assets = [], onAddAsset }) {
   const SHADERS = shaderPresets || window.SHADER_PRESETS || { plasma: '' };
   const { Select, Switch, Tag, Badge, Button, Input } = window.LatticeDesignSystem_e801cb;
 
@@ -43,7 +43,7 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
   // Image source: upload a binary (stored as an internal asset path) or pick an existing asset. The
   // node's `src` then holds an internal path like "src/assets/logo.png", resolved at render time.
   const assetImages = (assets || []).filter(a => a.type === 'file' && a.dataUrl && /\.(png|jpe?g|gif|svg|webp|avif|ico|bmp)$/i.test(a.path));
-  const pickImageAsset = () => {
+  const pickImageAsset = (key = 'src') => {
     if (!onAddAsset) return;
     const input = document.createElement('input');
     input.type = 'file'; input.accept = 'image/*';
@@ -51,21 +51,42 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
       const file = input.files && input.files[0];
       if (!file) return;
       const reader = new FileReader();
-      reader.onload = () => { const path = onAddAsset(file.name, reader.result, file.type); if (path) set('src')(path); };
+      reader.onload = () => { const path = onAddAsset(file.name, reader.result, file.type); if (path) set(key)(path); };
       reader.readAsDataURL(file);
     };
     input.click();
   };
-  const renderImgSource = () => (
+  const renderImgSource = (key = 'src') => (
     <div style={{ display: 'flex', gap: 6 }}>
-      <Button variant="outline" size="sm" onClick={pickImageAsset} iconLeft={<i data-lucide="upload"></i>}>Upload</Button>
+      <Button variant="outline" size="sm" onClick={() => pickImageAsset(key)} iconLeft={<i data-lucide="upload"></i>}>Upload</Button>
       {assetImages.length > 0 && (
         <Select size="sm" value="" title="Use an asset by internal path" wrapStyle={{ flex: 1 }}
-          onChange={e => { if (e.target.value) set('src')(e.target.value); }}
+          onChange={e => { if (e.target.value) set(key)(e.target.value); }}
           options={[{ value: '', label: 'From assets…' }].concat(assetImages.map(a => ({ value: a.path, label: a.path.split('/').pop() })))} />
       )}
     </div>
   );
+  // Shared "Custom source" block for any icon slot: override the Lucide glyph with an uploaded/asset
+  // image (svg/png/jpg…) or pasted SVG code. `srcKey`/`svgKey` name the node fields that store them.
+  // Render priority in the canvas/preview: pasted SVG > image/asset > Lucide.
+  const iconCustomSource = (srcKey, svgKey) => (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border-subtle)' }}>
+      <div style={fieldCap}>Custom source (optional)</div>
+      <Input label="Image (URL or asset path)" size="sm" placeholder="https://… or src/assets/…" value={node[srcKey] || ''} onChange={e => set(srcKey)(e.target.value)} />
+      {renderImgSource(srcKey)}
+      <div>
+        <div style={fieldCap}>Paste SVG code</div>
+        <textarea value={node[svgKey] || ''} onChange={e => set(svgKey)(e.target.value)} spellCheck={false}
+          placeholder="<svg …>…</svg>"
+          style={{ width: '100%', minHeight: 72, boxSizing: 'border-box', padding: 8, border: '1px solid var(--border-default)', background: 'var(--surface-inset)', color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', fontSize: 12, outline: 'none', resize: 'vertical' }} />
+      </div>
+      {(node[svgKey] || node[srcKey]) && (
+        <Button variant="ghost" size="sm" onClick={() => onChange(node.id, { [svgKey]: '', [srcKey]: '' })} iconLeft={<i data-lucide="rotate-ccw"></i>}>Use Lucide icon</Button>
+      )}
+    </div>
+  );
+  // Custom fonts uploaded into the project (Code page) become selectable font families everywhere.
+  const customFonts = (window.latticeFontFamilies ? window.latticeFontFamilies(assets) : []);
   // W/H editing keeps the ratio when "Lock aspect ratio" is on
   const ratio = (node.w && node.h) ? node.w / node.h : 1;
   const setW = (v) => { const w = Math.max(12, +v || 12); if (node.lockAspect) onChange(node.id, { w, h: Math.max(8, Math.round(w / ratio)) }); else set('w')(w); };
@@ -96,18 +117,26 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
         )}
 
         {!frameEditing && singleSelected && onSetEditingState && (() => {
-          const NAME = { default: 'Default', hoverOn: 'Hover On', hoverOff: 'Hover Off', clickOn: 'Click On' };
+          const LABELS = window.STATE_LABELS || { default: 'Default' };
+          const KEYS = window.STATE_KEYS || [];
           const customs = node.customStates || [];
-          const nameOf = (k) => NAME[k] || (customs.find(c => c.id === k) || {}).name || k;
+          const anims = customs.filter(c => (c.type || 'static') === 'anim');
+          const nameOf = (k) => LABELS[k] || (customs.find(c => c.id === k) || {}).name || k;
           const has = (k) => window.stateHasOverrides && window.stateHasOverrides(node, k);
           const off = (k) => window.stateEnabled && !window.stateEnabled(node, k);
           const tag = (k) => (has(k) ? '  •' : '') + (off(k) ? '  (off)' : '');
           const enabled = window.stateEnabled ? window.stateEnabled(node, editingState) : true;
           const st = (node.states && node.states[editingState]) || {};
           const custom = customs.find(c => c.id === editingState);
-          const opts = ['default', 'hoverOn', 'hoverOff', 'clickOn'].map(k => ({ value: k, label: NAME[k] + (k === 'default' ? '' : tag(k)) }))
+          const isBuiltin = KEYS.indexOf(editingState) !== -1;
+          const animMode = isBuiltin && !!st.animId;
+          const boundAnim = animMode ? customs.find(c => c.id === st.animId) : null;
+          // Keyframe count = the busiest track's key count (or legacy frame count) — for labels.
+          const kfCount = (c) => (c && c.tracks) ? c.tracks.reduce((m, tr) => Math.max(m, (tr.keys || []).length), 0) : ((c && c.frames) || []).length;
+          const opts = ['default'].concat(KEYS).map(k => ({ value: k, label: (LABELS[k] || k) + (k === 'default' ? '' : tag(k)) }))
             .concat(customs.map(c => ({ value: c.id, label: c.name + tag(c.id) })))
             .concat([{ value: '__new', label: '＋ New custom state' }]);
+          const bind = (v) => onBindAnim && onBindAnim(editingState, v);
           return (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <Select label="Interaction state" size="sm" value={editingState}
@@ -115,30 +144,66 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
               {editingState !== 'default' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: 10, border: '1px solid var(--border-subtle)', borderRadius: 4, background: 'var(--surface-inset)', opacity: enabled ? 1 : 0.65 }}>
                   {custom && <Input label="State name" size="sm" value={custom.name} onChange={e => onUpdateCustomState && onUpdateCustomState(custom.id, { name: e.target.value })} />}
-                  {custom && <Select label="Type" size="sm" options={[{ value: 'static', label: 'Static' }, { value: 'anim', label: 'Animation (frames)' }]}
+                  {custom && <Select label="Type" size="sm" options={[{ value: 'static', label: 'Static' }, { value: 'anim', label: 'Animation' }]}
                     value={custom.type || 'static'} onChange={e => onUpdateCustomState && onUpdateCustomState(custom.id, { type: e.target.value })} />}
                   <Switch label={`Enable ${nameOf(editingState)}`} checked={enabled} onChange={on => onChange(node.id, { off: !on })} />
 
-                  {(!custom || custom.type !== 'anim') && (
+                  {/* Built-in trigger: pick a Static variant or an assigned Animation. */}
+                  {isBuiltin && (
                     <>
-                      <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Changes below apply only when <b>{nameOf(editingState)}</b> is active{enabled ? '' : ' — currently disabled'}.</div>
-                      <NumRow label="Duration ms" value={st.dur ?? 150} min={0} onChange={v => onChange(node.id, { dur: Math.max(0, +v || 0) })} />
-                      <Select label="Easing" size="sm" options={['ease-out', 'ease-in-out', 'ease-in', 'linear']} value={st.ease || 'ease-out'} onChange={e => onChange(node.id, { ease: e.target.value })} />
-                      {editingState === 'clickOn' && (
+                      <Select label="Reaction" size="sm"
+                        options={[{ value: 'static', label: 'Static (variant)' }, { value: 'anim', label: 'Animation' }]}
+                        value={animMode ? 'anim' : 'static'}
+                        onChange={e => bind(e.target.value === 'anim' ? '__use' : '')} />
+                      {(editingState === 'click' || editingState === 'rightClick') && (
                         <Select label="Click mode" size="sm" options={[{ value: 'toggle', label: 'Toggle (sticky)' }, { value: 'press', label: 'While pressed' }]}
                           value={node.clickMode || 'toggle'} onChange={e => (onBaseChange || onChange)(node.id, { clickMode: e.target.value })} />
                       )}
                     </>
                   )}
 
+                  {/* Static reaction (built-in) or a static custom state: timing; edit the look in the sections below. */}
+                  {((isBuiltin && !animMode) || (custom && custom.type !== 'anim')) && (
+                    <>
+                      <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Edit the sections below to shape how <b>{nameOf(editingState)}</b> looks{enabled ? '' : ' — currently disabled'}.</div>
+                      <NumRow label="Duration ms" value={st.dur ?? 150} min={0} onChange={v => onChange(node.id, { dur: Math.max(0, +v || 0) })} />
+                      <Select label="Easing" size="sm" options={['ease-out', 'ease-in-out', 'ease-in', 'linear']} value={st.ease || 'ease-out'} onChange={e => onChange(node.id, { ease: e.target.value })} />
+                    </>
+                  )}
+
+                  {/* Hold trigger extras: how long before it counts as a hold, and whether to freeze the last key. */}
+                  {editingState === 'hold' && (
+                    <>
+                      <NumRow label="Hold after ms" value={st.holdMs ?? 250} min={0} onChange={v => onChange(node.id, { holdMs: Math.max(0, +v || 0) })} />
+                      <Switch label="Sustain last keyframe" checked={st.sustain !== false} onChange={on => onChange(node.id, { sustain: on })} />
+                    </>
+                  )}
+
+                  {/* Animation reaction: assign an animation and open the timeline editor. */}
+                  {isBuiltin && animMode && (
+                    <>
+                      <Select label="Animation" size="sm"
+                        options={anims.map(c => ({ value: c.id, label: c.name + ' · ' + kfCount(c) + ' key' + (kfCount(c) === 1 ? '' : 's') })).concat([{ value: '__new', label: '＋ New animation' }])}
+                        value={st.animId} onChange={e => bind(e.target.value)} />
+                      {boundAnim && <Switch label="Loop" checked={!!boundAnim.loop} onChange={on => onUpdateCustomState && onUpdateCustomState(boundAnim.id, { loop: on })} />}
+                      <Button variant="solid" size="sm" fullWidth iconLeft={<i data-lucide="film"></i>} onClick={() => onOpenAnimEditor && onOpenAnimEditor(st.animId)}>Open timeline editor</Button>
+                    </>
+                  )}
+
+                  {/* Custom animation state: author it on the timeline, then assign it to a trigger above. */}
                   {custom && custom.type === 'anim' && (
                     <>
                       <Switch label="Loop" checked={!!custom.loop} onChange={on => onUpdateCustomState(custom.id, { loop: on })} />
-                      <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Open the editor to duplicate the component into keyframes, connect them, and set each transition's duration. Preview plays them in order.</div>
+                      <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Author per-property keyframes on a timeline. Assign this animation to a trigger above, or tear it off to preview in the dock.</div>
                       <Button variant="solid" size="sm" fullWidth iconLeft={<i data-lucide="film"></i>} onClick={() => onOpenAnimEditor && onOpenAnimEditor(custom.id)}>
-                        Adjust{(custom.frames || []).length ? ` (${custom.frames.length} keyframe${custom.frames.length === 1 ? '' : 's'})` : ''}
+                        Open timeline editor{kfCount(custom) ? ` (${kfCount(custom)} key${kfCount(custom) === 1 ? '' : 's'})` : ''}
                       </Button>
                     </>
+                  )}
+
+                  {/* One-click default preset for a built-in trigger. */}
+                  {isBuiltin && onApplyPreset && (
+                    <Button variant="outline" size="sm" fullWidth iconLeft={<i data-lucide="wand-2"></i>} onClick={() => onApplyPreset(editingState)}>Apply default animation</Button>
                   )}
 
                   {custom
@@ -212,7 +277,7 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <NumRow label="Font size" value={node.fontSize ?? (kind === 'heading' ? 28 : 14)} min={8} onChange={setNum('fontSize', 8)} />
               <Select label="Weight" size="sm" options={['regular', 'medium', 'semibold', 'bold']} value={node.fontWeight || (kind === 'heading' ? 'semibold' : 'regular')} onChange={e => set('fontWeight')(e.target.value)} />
-              <Select label="Font family" size="sm" options={['Grotesk (UI)', 'Serif display', 'Mono', 'System']} value={node.fontFamily || (kind === 'heading' ? 'Serif display' : 'Grotesk (UI)')} onChange={e => set('fontFamily')(e.target.value)} />
+              <Select label="Font family" size="sm" options={['Grotesk (UI)', 'Serif display', 'Mono', 'System'].concat(customFonts)} value={node.fontFamily || (kind === 'heading' ? 'Serif display' : 'Grotesk (UI)')} onChange={e => set('fontFamily')(e.target.value)} />
               <NumRow label="Line height" value={node.lineHeight ?? 1.4} min={0.8} step={0.1} onChange={v => set('lineHeight')(+v || 1.4)} />
               <NumRow label="Letter sp." value={node.letterSpacing ?? 0} min={-5} step={0.5} onChange={v => set('letterSpacing')(+v || 0)} />
               <Select label="Transform" size="sm" options={['none', 'uppercase', 'lowercase', 'capitalize']} value={node.textTransform || 'none'} onChange={e => set('textTransform')(e.target.value)} />
@@ -234,6 +299,8 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
                   <Select label="Vertical align" size="sm" options={['top', 'middle', 'bottom']} value={node.iconVAlign || 'middle'} onChange={e => set('iconVAlign')(e.target.value)} />
                 </>
               } />
+            {/* Override the Lucide glyph with an uploaded/asset image or pasted SVG. */}
+            {iconCustomSource('iconSrc', 'iconSvg')}
           </Section>
         )}
 
@@ -255,6 +322,7 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
                         <NumRow label="Gap" value={node.btnIconGap ?? 7} min={0} onChange={v => set('btnIconGap')(Math.max(0, +v || 0))} />
                       </>
                     } />
+                  {iconCustomSource('btnIconSrc', 'btnIconSvg')}
                 </div>
               )}
             </div>

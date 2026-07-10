@@ -59,6 +59,7 @@ function nodeStyleObj(n) {
   if (bg) style.background = bg;
   if (n.textColor) style.color = n.textColor;
   if (n.fontFamily && CSS_FONT[n.fontFamily]) style.fontFamily = CSS_FONT[n.fontFamily];
+  else if (n.fontFamily) style.fontFamily = "'" + n.fontFamily + "'"; // custom uploaded font family
   else if (n.kind === 'heading') style.fontFamily = 'var(--font-serif-display)';
   if (n.fontSize) style.fontSize = n.fontSize;
   if (n.fontWeight && CSS_WEIGHT[n.fontWeight]) style.fontWeight = CSS_WEIGHT[n.fontWeight];
@@ -84,6 +85,16 @@ function nodeToTsx(n, resolveImg) {
     const img = resolveImg(n.src);
     const srcExpr = img ? (img.var ? '{' + img.var + '}' : JSON.stringify(img.url)) : '""';
     return '      <img src=' + srcExpr + ' alt=' + JSON.stringify(n.label || '') + ' style={' + styleStr + '} />';
+  }
+  if (kind === 'icon') {
+    if (n.iconSvg) return '      <div style={' + styleStr + '} dangerouslySetInnerHTML={{ __html: ' + JSON.stringify(n.iconSvg) + ' }} />';
+    if (n.iconSrc) {
+      const img = resolveImg(n.iconSrc);
+      const srcExpr = img ? (img.var ? '{' + img.var + '}' : JSON.stringify(img.url)) : '""';
+      return '      <img src=' + srcExpr + ' alt="" style={' + styleStr + '} />';
+    }
+    // Lucide glyphs aren't bundled in the export — leave a pointer to lucide-react.
+    return '      <div style={' + styleStr + '}>{/* icon "' + (n.iconName || 'star') + '": npm i lucide-react, then render the matching icon */}</div>';
   }
   if (kind === 'button') return '      <button style={' + styleStr + '}>' + jsxText(text) + '</button>';
   if (kind === 'link') return '      <a href=' + JSON.stringify(n.href || '#') + ' style={' + styleStr + '}>' + jsxText(text) + '</a>';
@@ -176,15 +187,22 @@ function genAppTsx(meta) {
   const routes = list.map(m => '  { path: ' + JSON.stringify(m.route) + ', name: ' + JSON.stringify(m.name) + ', Comp: ' + m.comp + ' }').join(',\n');
   return "import React from 'react';\n" + imports + "\n\nconst pages = [\n" + routes + "\n];\n\nexport default function App() {\n  const [hash, setHash] = React.useState(() => window.location.hash.slice(1) || pages[0].path);\n  React.useEffect(() => {\n    const on = () => setHash(window.location.hash.slice(1) || pages[0].path);\n    window.addEventListener('hashchange', on);\n    return () => window.removeEventListener('hashchange', on);\n  }, []);\n  const current = pages.find(p => p.path === hash) || pages[0];\n  const Current = current.Comp;\n  return (\n    <div style={{ minHeight: '100vh' }}>\n      <nav style={{ display: 'flex', gap: 16, padding: '12px 20px', borderBottom: '1px solid var(--border-subtle)' }}>\n        {pages.map(p => (\n          <a key={p.path} href={'#' + p.path} style={{ color: p.path === current.path ? 'var(--text-primary)' : 'var(--text-muted)', textDecoration: 'none', fontSize: 14, fontWeight: p.path === current.path ? 600 : 400 }}>{p.name}</a>\n        ))}\n      </nav>\n      <Current />\n    </div>\n  );\n}\n";
 }
-function genIndexCss() {
-  return "/* Design tokens (approximated from the Lattice design system — tune to taste). */\n:root {\n  --bg-app: #0b0d12; --surface: #101319; --surface-card: #12161d; --surface-inset: #0d1016;\n  --surface-hover: #1a1f2a; --surface-raised: #161b24;\n  --border-subtle: #1c2029; --border-default: #2a2f3a; --border-strong: #3a404d;\n  --text-primary: #e7e9ee; --text-secondary: #aeb4c0; --text-muted: #7c8290; --text-disabled: #565c68;\n  --action-solid: #ffffff; --action-solid-text: #0b0d12;\n  --blue-base: #3987e5; --green-base: #199e70; --amber-base: #c98500; --status-danger-fg: #e66767;\n  --font-sans: 'Space Grotesk', system-ui, sans-serif;\n  --font-serif-display: 'Newsreader', Georgia, serif;\n  --font-mono: 'JetBrains Mono', ui-monospace, monospace;\n}\n* { box-sizing: border-box; }\nhtml, body, #root { height: 100%; }\nbody { margin: 0; background: var(--bg-app); color: var(--text-primary); font-family: var(--font-sans); -webkit-font-smoothing: antialiased; }\na { color: inherit; }\n";
+function genIndexCss(fontFaceCss) {
+  const faces = fontFaceCss ? '/* Fonts uploaded in the editor. */\n' + fontFaceCss + '\n\n' : '';
+  return faces + "/* Design tokens (approximated from the Lattice design system — tune to taste). */\n:root {\n  --bg-app: #0b0d12; --surface: #101319; --surface-card: #12161d; --surface-inset: #0d1016;\n  --surface-hover: #1a1f2a; --surface-raised: #161b24;\n  --border-subtle: #1c2029; --border-default: #2a2f3a; --border-strong: #3a404d;\n  --text-primary: #e7e9ee; --text-secondary: #aeb4c0; --text-muted: #7c8290; --text-disabled: #565c68;\n  --action-solid: #ffffff; --action-solid-text: #0b0d12;\n  --blue-base: #3987e5; --green-base: #199e70; --amber-base: #c98500; --status-danger-fg: #e66767;\n  --font-sans: 'Space Grotesk', system-ui, sans-serif;\n  --font-serif-display: 'Newsreader', Georgia, serif;\n  --font-mono: 'JetBrains Mono', ui-monospace, monospace;\n}\n* { box-sizing: border-box; }\nhtml, body, #root { height: 100%; }\nbody { margin: 0; background: var(--bg-app); color: var(--text-primary); font-family: var(--font-sans); -webkit-font-smoothing: antialiased; }\na { color: inherit; }\n";
+}
+// @font-face rules for the exported project: reference each font asset by its relative path from
+// src/index.css (e.g. url('./assets/fonts/Inter-Bold.woff2')).
+function exportFontFaceCss(assets) {
+  if (!window.latticeFontFaceCss) return '';
+  return window.latticeFontFaceCss(assets, a => "'./" + a.path.replace(/^src\//, '') + "'");
 }
 function genGitignore() { return "node_modules\ndist\ndist-ssr\n*.local\n.DS_Store\n.vscode/*\n!.vscode/extensions.json\n"; }
 function genReadme(name) {
   return '# ' + (name || 'Lattice app') + '\n\nExported from **Lattice**. A Vite + React + TypeScript app.\n\n## Getting started\n\n```bash\nnpm install\nnpm run dev\n```\n\nThen open the printed local URL.\n\n## Structure\n\n- `src/pages/*` — one component per Lattice page (generated from the design).\n- `src/App.tsx` — hash router across the pages.\n- `src/assets/*` — images and other binaries you added in the editor.\n- `src/index.css` — design tokens + reset.\n\n> Generated pages are a faithful static starting point (position, size, fill, border, radius,\n> shadow, text, images). Refine them into idiomatic components as you go.\n';
 }
 
-function scaffoldFiles(pages, projectName) {
+function scaffoldFiles(pages, projectName, assets) {
   return [
     { path: 'package.json', content: genPackageJson(projectName) },
     { path: 'index.html', content: genIndexHtml(projectName) },
@@ -194,7 +212,7 @@ function scaffoldFiles(pages, projectName) {
     { path: '.gitignore', content: genGitignore() },
     { path: 'README.md', content: genReadme(projectName) },
     { path: 'src/main.tsx', content: genMainTsx() },
-    { path: 'src/index.css', content: genIndexCss() },
+    { path: 'src/index.css', content: genIndexCss(exportFontFaceCss(assets)) },
   ];
 }
 
@@ -248,7 +266,7 @@ function downloadText(filename, text) { downloadBlob(filename, new Blob([text], 
 // Every file the exported project should contain: scaffold-defaults < generated < user assets.
 function fullProjectFiles(pages, assets, projectName) {
   const map = {};
-  scaffoldFiles(pages, projectName).forEach(f => { map[f.path] = { text: f.content }; });
+  scaffoldFiles(pages, projectName, assets).forEach(f => { map[f.path] = { text: f.content }; });
   generatedFiles(pages).forEach(f => { map[f.path] = { text: f.content }; });
   (assets || []).forEach(a => {
     if (a.type === 'folder') return;
@@ -283,6 +301,7 @@ function sortedChildren(node) {
 }
 const IMG_RE = /\.(png|jpe?g|gif|svg|webp|avif|ico|bmp)$/i;
 function fileIcon(name) {
+  if (/\.(woff2?|ttf|otf)$/i.test(name)) return 'type';
   if (IMG_RE.test(name)) return 'image';
   if (/\.(tsx|ts|jsx|js)$/.test(name)) return 'file-code';
   if (/\.css$/.test(name)) return 'palette';
@@ -397,7 +416,7 @@ function CodePanel({ pages, activePageId, assets, onChangeAssets, projectName, s
 
   const initProject = () => {
     const existing = new Set(assets.map(a => a.path));
-    const additions = scaffoldFiles(pages, projectName).filter(f => !existing.has(f.path))
+    const additions = scaffoldFiles(pages, projectName, assets).filter(f => !existing.has(f.path))
       .map(f => ({ id: 'as_' + Math.random().toString(36).slice(2), path: f.path, type: 'file', content: f.content }));
     // ensure src/assets folder exists for uploads
     if (!assets.some(a => a.path === 'src/assets')) additions.push({ id: 'as_assets', path: 'src/assets', type: 'folder' });
@@ -501,7 +520,7 @@ function CodePanel({ pages, activePageId, assets, onChangeAssets, projectName, s
   return (
     <div style={{ flex: 1, minWidth: 0, display: 'flex', background: 'var(--bg-app)', position: 'relative' }}>
       <style>{'.lt-tree-row:hover .lt-row-actions{opacity:1 !important}.lt-tree-row:hover{background:var(--surface-hover)}'}</style>
-      <input ref={fileInputRef} type="file" accept="image/*" multiple style={{ display: 'none' }} onChange={doUpload} />
+      <input ref={fileInputRef} type="file" accept="image/*,.svg,.woff,.woff2,.ttf,.otf" multiple style={{ display: 'none' }} onChange={doUpload} />
 
       {/* File explorer rail (resizable) */}
       <div style={{ width: railW, flex: 'none', borderRight: '1px solid var(--border-subtle)', background: 'var(--surface)', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
@@ -509,7 +528,7 @@ function CodePanel({ pages, activePageId, assets, onChangeAssets, projectName, s
           <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--text-muted)', flex: 1 }}>Explorer</span>
           {iconBtn('file-plus', 'New file', () => openNew('file', 'src'))}
           {iconBtn('folder-plus', 'New folder', () => openNew('folder', 'src'))}
-          {iconBtn('image-plus', 'Upload image', () => triggerUpload('src/assets'))}
+          {iconBtn('image-plus', 'Upload asset (image, SVG, font)', () => triggerUpload('src/assets'))}
         </div>
         <div style={{ flex: 1, overflow: 'auto', padding: '6px 4px' }}>
           {renderNode(tree, 0)}
