@@ -77,9 +77,11 @@ function tracksDuration(tracks) {
   return m;
 }
 // Total run time of an animation state: explicit `duration`, else the last keyframe time.
+// A stored `duration` of 0 means "not set" — a zero-length animation is never intentional, and states
+// migrated before they had any keys carry a 0 (see ensureTracks). TimelineEditor reads it the same way.
 function stateDuration(state) {
   if (!state) return 0;
-  if (state.duration != null) return state.duration;
+  if (state.duration) return state.duration;
   return tracksDuration(ensureTracks(state).tracks);
 }
 
@@ -113,7 +115,10 @@ function ensureTracks(state) {
   if (!state) return state;
   if (state.tracks) return state;
   const tracks = framesToTracks(state.frames);
-  return { ...state, tracks, duration: state.duration != null ? state.duration : tracksDuration(tracks) };
+  // Only carry a duration once there's something to time — a keyless state must stay "auto", or the 0
+  // gets persisted (App's mutTracks writes this object back) and freezes the animation forever.
+  const dur = state.duration != null ? state.duration : tracksDuration(tracks);
+  return dur ? { ...state, tracks, duration: dur } : { ...state, tracks };
 }
 
 // The node as it looks at time `t` in an animation state (base node + sampled track overrides).

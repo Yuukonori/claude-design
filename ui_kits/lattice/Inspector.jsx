@@ -134,7 +134,7 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
           // Keyframe count = the busiest track's key count (or legacy frame count) — for labels.
           const kfCount = (c) => (c && c.tracks) ? c.tracks.reduce((m, tr) => Math.max(m, (tr.keys || []).length), 0) : ((c && c.frames) || []).length;
           const opts = ['default'].concat(KEYS).map(k => ({ value: k, label: (LABELS[k] || k) + (k === 'default' ? '' : tag(k)) }))
-            .concat(customs.map(c => ({ value: c.id, label: c.name + tag(c.id) })))
+            .concat(customs.map(c => ({ value: c.id, label: c.name + ' (Custom)' + tag(c.id) })))
             .concat([{ value: '__new', label: '＋ New custom state' }]);
           const bind = (v) => onBindAnim && onBindAnim(editingState, v);
           return (

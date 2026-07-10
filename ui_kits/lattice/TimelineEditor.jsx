@@ -125,6 +125,13 @@ function TimelineEditor(props) {
   const onAddTrack = props.onAddTrack, onDeleteTrack = props.onDeleteTrack;
   const onAddKey = props.onAddKey, onUpdateKey = props.onUpdateKey, onDeleteKey = props.onDeleteKey;
   const onSetDuration = props.onSetDuration, onSetLoop = props.onSetLoop;
+  // Scope switch: 'component' animates one node's own props, 'page' animates every node on the page.
+  // `canComponent` is false when there's no component animation to jump back to (nothing selected
+  // that owns one), which greys the Component half rather than switching to an empty editor.
+  const mode = pageMode ? 'page' : 'component';
+  const onSetMode = props.onSetMode, canComponent = props.canComponent !== false;
+  const onClose = props.onClose; // when set, show a close ✕ in the transport bar (the scene timeline's exit)
+  const onSetHeightMax = props.onSetHeightMax, onSetHeightMin = props.onSetHeightMin; // dock height presets
 
   const { Switch } = window.LatticeDesignSystem_e801cb;
   const tracks = (state && state.tracks) || [];
@@ -147,7 +154,11 @@ function TimelineEditor(props) {
   const durRef = React.useRef(duration); durRef.current = duration;
 
   const px = (t) => t * zoom;
-  const laneW = px(duration) + 48;
+  const durX = px(duration);                          // x of the duration boundary
+  // Extend the ruler/lanes well past the duration (→ "endless") only once there's something to animate.
+  // With nothing animated, keep it tidy so the empty-state card centres in view, not out in the dark.
+  const overrun = tracks.length ? Math.max(durX, 1600) : 0;
+  const laneW = durX + overrun + 48;
   React.useEffect(() => { if (window.renderLucideIcons) window.renderLucideIcons(); });
 
   // Playback loop.
@@ -234,8 +245,10 @@ function TimelineEditor(props) {
   const selKey = selTrack ? (selTrack.keys || [])[sel.ki] : null;
 
   const fmt = (ms) => (ms / 1000).toFixed(2) + 's';
+  const tickStep = Math.max(50, Math.round(duration / 10 / 50) * 50);
+  const endT = Math.ceil((laneW - 48) / zoom / tickStep) * tickStep;   // ticks span the whole endless lane
   const ticks = [];
-  for (let t = 0; t <= duration; t += Math.max(50, Math.round(duration / 10 / 50) * 50)) ticks.push(t);
+  for (let t = 0; t <= endT; t += tickStep) ticks.push(t);
   const bw = Math.max(1, (targetNode && targetNode.w) || 160), bh = Math.max(1, (targetNode && targetNode.h) || 120);
   const stageW = stageMode === 'min' ? 0 : stageMode === 'max' ? 440 : 280;
 
@@ -259,13 +272,26 @@ function TimelineEditor(props) {
     : <PreviewNode node={sampleAt(targetNode, t)} />;
 
   return (
-    <div style={{ position: 'relative', flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', background: 'var(--bg-void)' }}>
+    <div className="tl-root" style={{ position: 'relative', flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', background: 'var(--bg-void)' }}>
       <TLStyles />
 
       {/* Transport bar — wraps to a second row on narrow panels so nothing clips or squishes. */}
       <div style={{ flex: 'none', display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10, rowGap: 6, padding: '8px 14px', borderBottom: '1px solid var(--border-subtle)', background: 'var(--surface)' }}>
         <i data-lucide="film" style={{ width: 15, height: 15, color: 'var(--text-secondary)', flex: 'none' }}></i>
         <span style={{ fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap' }}>{(state && state.name) || 'Animation'}</span>
+        {onSetMode && (
+          <div style={{ display: 'flex', flex: 'none', border: '1px solid var(--border-subtle)', borderRadius: 4, overflow: 'hidden' }}>
+            <button type="button" disabled={mode !== 'component' && !canComponent} onClick={() => onSetMode('component')}
+              title={mode === 'component' || canComponent ? 'Animate one component’s own properties' : 'Select a component with an animation state to author one'}
+              style={tlSeg(mode === 'component', mode !== 'component' && !canComponent)}>
+              <i data-lucide="box" style={tlIco}></i>Component
+            </button>
+            <button type="button" onClick={() => onSetMode('page')} title="Animate the whole page — every component's position, scale and more"
+              style={tlSeg(mode === 'page', false)}>
+              <i data-lucide="layout" style={tlIco}></i>Page
+            </button>
+          </div>
+        )}
         <span style={{ width: 1, height: 18, background: 'var(--border-subtle)' }} />
         <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
           <button type="button" title="Restart" onClick={() => { setPlayhead(0); setPlaying(true); }} style={tlBtn}><i data-lucide="skip-back" style={tlIco}></i></button>
@@ -293,6 +319,21 @@ function TimelineEditor(props) {
             style={{ flex: 'none', whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 7, height: 28, padding: '0 12px', border: '1px solid var(--action-solid)', background: 'var(--action-solid)', color: 'var(--action-solid-text)', fontSize: 12.5, fontWeight: 600, borderRadius: 4, cursor: 'pointer' }}>
             <i data-lucide="plus" style={{ width: 14, height: 14, flex: 'none' }}></i>Animate a property
           </button>
+          {onSetHeightMax && (
+            <>
+              <button type="button" title="Maximise timeline (taller)" onClick={onSetHeightMax} style={{ ...tlBtn, marginLeft: 2 }}>
+                <i data-lucide="chevrons-up" style={tlIco}></i>
+              </button>
+              <button type="button" title="Minimise timeline (shorter)" onClick={onSetHeightMin} style={tlBtn}>
+                <i data-lucide="chevrons-down" style={tlIco}></i>
+              </button>
+            </>
+          )}
+          {onClose && (
+            <button type="button" title="Close timeline" onClick={onClose} style={{ ...tlBtn, marginLeft: 2 }}>
+              <i data-lucide="x" style={tlIco}></i>
+            </button>
+          )}
         </div>
       </div>
 
@@ -361,14 +402,19 @@ function TimelineEditor(props) {
 
             {/* Lanes */}
             <div ref={laneRef} style={{ flex: 1, minWidth: 0, overflowX: 'auto', overflowY: 'hidden', position: 'relative' }}>
-              <div style={{ position: 'relative', width: laneW, minHeight: '100%' }}>
+              <div style={{ position: 'relative', width: laneW, minWidth: '100%', minHeight: '100%' }}>
                 {/* Ruler */}
                 <div onMouseDown={e => { dragRef.current = { type: 'play' }; const rect = laneRef.current.getBoundingClientRect(); setPlayhead(Math.max(0, Math.min(duration, Math.round((e.clientX - rect.left + laneRef.current.scrollLeft) / zoom)))); }}
                   style={{ height: 26, boxSizing: 'border-box', background: 'var(--surface)', borderBottom: '1px solid var(--border-subtle)', cursor: 'ew-resize', position: 'relative', zIndex: 4 }}>
                   {ticks.map(t => (
-                    <div key={t} style={{ position: 'absolute', left: px(t), top: 0, height: '100%', borderLeft: '1px solid var(--border-subtle)', paddingLeft: 4, fontSize: 9, fontFamily: 'var(--font-mono)', color: 'var(--text-disabled)', display: 'flex', alignItems: 'center' }}>{Math.round(t)}</div>
+                    <div key={t} style={{ position: 'absolute', left: px(t), top: 0, height: '100%', borderLeft: '1px solid var(--border-subtle)', paddingLeft: 4, fontSize: 9, fontFamily: 'var(--font-mono)', color: 'var(--text-disabled)', opacity: t > duration ? 0.4 : 1, display: 'flex', alignItems: 'center' }}>{Math.round(t)}</div>
                   ))}
                 </div>
+                {/* Beyond the set duration: dim the lanes. The ruler keeps ticking, so the timeline feels endless. */}
+                {tracks.length > 0 && <>
+                  <div style={{ position: 'absolute', left: durX, top: 26, bottom: 0, width: Math.max(0, laneW - durX), background: 'rgba(0, 0, 0, 0.4)', pointerEvents: 'none', zIndex: 1 }} />
+                  <div style={{ position: 'absolute', left: durX, top: 0, bottom: 0, width: 1, background: 'var(--border-strong)', pointerEvents: 'none', zIndex: 5 }} />
+                </>}
                 {/* Playhead */}
                 <div style={{ position: 'absolute', left: px(playhead), top: 0, bottom: 0, width: 1, background: 'var(--blue-base)', zIndex: 3, pointerEvents: 'none' }}>
                   <div style={{ position: 'absolute', top: 0, left: -5, width: 11, height: 8, background: 'var(--blue-base)', clipPath: 'polygon(50% 100%, 0 0, 100% 0)' }} />
@@ -640,6 +686,10 @@ function TLScene({ nodes, sample, selId }) {
 function TLStyles() {
   return (
     <style>{`
+      /* Dragging on the timeline should scrub/pan, not highlight the ruler numbers & labels (which pops
+         the browser's text-selection toolbar). Text stays selectable inside real fields. */
+      .tl-root { user-select: none; -webkit-user-select: none; }
+      .tl-root input, .tl-root textarea, .tl-root select, .tl-root [contenteditable] { user-select: text; -webkit-user-select: text; }
       .tl-track .tl-showhover { opacity: 0; transition: opacity var(--dur-fast) var(--ease-out); }
       .tl-track:hover .tl-showhover { opacity: 1; }
       .tl-lane:hover { background: color-mix(in srgb, var(--surface-hover) 40%, transparent); }
@@ -659,5 +709,12 @@ const tlField = { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize
 const tlSelect = { height: 22, padding: '0 6px', border: '1px solid var(--border-subtle)', borderRadius: 3, background: 'var(--surface-inset)', color: 'var(--text-secondary)', fontSize: 11.5, outline: 'none', cursor: 'pointer', fontFamily: 'var(--font-sans)' };
 const tlHint = { display: 'inline-flex', alignItems: 'center', gap: 5, flex: 'none' };
 const tlHintKey = { color: 'var(--text-secondary)', fontWeight: 600 };
+// One half of the Component|Page scope switch. `on` = this scope is being authored.
+const tlSeg = (on, disabled) => ({
+  display: 'inline-flex', alignItems: 'center', gap: 5, height: 22, padding: '0 9px', border: 0,
+  background: on ? 'var(--surface-hover)' : 'transparent',
+  color: disabled ? 'var(--text-disabled)' : on ? 'var(--text-primary)' : 'var(--text-muted)',
+  fontSize: 11.5, fontWeight: on ? 600 : 400, cursor: disabled ? 'default' : 'pointer', flex: 'none',
+});
 
 window.TimelineEditor = TimelineEditor;

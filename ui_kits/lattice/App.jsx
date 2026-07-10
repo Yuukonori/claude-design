@@ -233,6 +233,34 @@ function loadState() {
 }
 window.withWorkflowDefaults = withWorkflowDefaults;
 
+// Shown full-screen while a cloud project is being fetched, so the editor never paints the previous
+// (localStorage-seeded) project for a frame before the real one loads. Uses only the token CSS vars,
+// which are already applied via the stylesheet link before React mounts.
+function ProjectLoadingScreen({ name }) {
+  return (
+    <div style={{ position: 'fixed', inset: 0, zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg-app)' }}>
+      <style>{`
+        @keyframes lt-boot-spin { to { transform: rotate(360deg); } }
+        @keyframes lt-boot-pulse { 0%, 100% { opacity: .4 } 50% { opacity: .9 } }
+        @keyframes lt-boot-shimmer { 0% { background-position: -260px 0 } 100% { background-position: 260px 0 } }
+      `}</style>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 24, width: 260 }}>
+        <div style={{ width: 34, height: 34, borderRadius: '50%', border: '3px solid var(--border-subtle)', borderTopColor: 'var(--action-solid)', animation: 'lt-boot-spin .8s linear infinite' }} />
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5 }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name || 'Loading project'}</div>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', animation: 'lt-boot-pulse 1.4s ease-in-out infinite' }}>Loading components…</div>
+        </div>
+        {/* Skeleton bars imply the components streaming in, rather than a bare spinner. */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%', marginTop: 2 }}>
+          {[100, 78, 90].map((w, i) => (
+            <div key={i} style={{ height: 9, width: w + '%', borderRadius: 5, background: 'linear-gradient(90deg, var(--surface-inset) 0px, var(--surface-hover) 110px, var(--surface-inset) 220px)', backgroundSize: '440px 100%', animation: `lt-boot-shimmer 1.25s ease-in-out ${i * 0.16}s infinite` }} />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function LatticeApp() {
   const { Dialog, Toast, Button, Input, Switch, Select } = window.LatticeDesignSystem_e801cb;
 
@@ -303,6 +331,7 @@ function LatticeApp() {
   const [activeAnimId, setActiveAnimId] = React.useState(null);      // active anim tab id, or null when a page is active
   const [animFrameIdx, setAnimFrameIdx] = React.useState(0);         // selected keyframe in the active anim tab
   const [sceneOpen, setSceneOpen] = React.useState(false);           // page scene-timeline editor open
+  const [sceneReplay, setSceneReplay] = React.useState(0);           // bumped to restart Preview's scene timeline
   const [dock, setDock] = React.useState(null);                      // torn-off tab preview dock: {type,pageId,nodeId?,stateId?}
   const [dockH, setDockH] = React.useState(220);                     // dock height (drag to resize)
   const [tearing, setTearing] = React.useState(false);               // dragging a tab toward the bottom drop zone
@@ -319,6 +348,17 @@ function LatticeApp() {
   React.useEffect(() => { try { localStorage.setItem('lattice_left_sizes', JSON.stringify(panelH)); } catch {} }, [panelH]);
   const pagesSecRef = React.useRef(null);     // left-panel section wrappers, measured on resize-drag start
   const librarySecRef = React.useRef(null);
+  // Height of the timeline dock as a fraction of the center column (the rest shows the live page above).
+  const [timelineFrac, setTimelineFrac] = React.useState(() => {
+    const v = parseFloat(localStorage.getItem('lattice_timeline_frac')); return v >= 0.2 && v <= 0.94 ? v : 0.58;
+  });
+  React.useEffect(() => { try { localStorage.setItem('lattice_timeline_frac', String(timelineFrac)); } catch {} }, [timelineFrac]);
+  const timelineAreaRef = React.useRef(null); // measured to convert a resize-drag into a fraction
+  // Fully collapse a side panel for more canvas space (independent of its resizable width).
+  const [collapsed, setCollapsed] = React.useState(() => {
+    try { return { left: false, right: false, ...JSON.parse(localStorage.getItem('lattice_collapsed') || '{}') }; } catch { return { left: false, right: false }; }
+  });
+  React.useEffect(() => { try { localStorage.setItem('lattice_collapsed', JSON.stringify(collapsed)); } catch {} }, [collapsed]);
   const [shareOpen, setShareOpen] = React.useState(false);
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   const [previewDialog, setPreviewDialog] = React.useState(null);
@@ -334,6 +374,8 @@ function LatticeApp() {
   const [saving, setSaving] = React.useState(false);
   const [helpOpen, setHelpOpen] = React.useState(false);
   const projectLoadedRef = React.useRef(false);
+  // Only a cloud project has a remote load to wait for; standalone (localStorage) mode is ready at once.
+  const [loading, setLoading] = React.useState(!!projectId);
 
   const page = pages.find(p => p.id === activePageId) || pages[0];
   const nodes = page.nodes;
@@ -366,6 +408,12 @@ function LatticeApp() {
   const animState = (activeAnim && animNode) ? (animNode.customStates || []).find(c => c.id === activeAnim.stateId) || null : null;
   const animValid = !!(activeAnim && animNode && animState);       // tab still points at a live node+state
   const showScene = sceneOpen && !animValid;                       // page scene-timeline editor is active
+  // Is there a component animation to switch *back* to from page scope? Either an anim tab is already
+  // open on this page, or the selected node owns an animation state we could open one for.
+  const canComponentTimeline = openAnimTabs.some(t => t.pageId === activePageId) || (() => {
+    const n = nodes.find(x => x.id === selectedIds[0]);
+    return !!(n && (n.customStates || []).some(c => (c.type || 'static') === 'anim'));
+  })();
   const animFrame = animValid ? (animState.frames || [])[animFrameIdx] : null;
   // While an anim tab is open, the Inspector edits the selected keyframe's captured pose.
   const animInspectorNode = animValid ? (window.mergeFrame ? window.mergeFrame(animNode, animFrame) : animNode) : null;
@@ -438,6 +486,8 @@ function LatticeApp() {
   const runtimeVarsRef = React.useRef(runtimeVars);
   const pagesRef = React.useRef(pages);
   const viewRef = React.useRef(view);
+  const timelineOpenRef = React.useRef(false); // a TimelineEditor covers the canvas — it owns ⌫ and ←/→
+  const animCtlRef = React.useRef(null);       // PreviewCanvas publishes { playAnim } here while mounted
   React.useEffect(() => { editingStateRef.current = editingState; }, [editingState]);
   React.useEffect(() => { openAnimTabsRef.current = openAnimTabs; }, [openAnimTabs]);
   React.useEffect(() => { activeAnimRef.current = activeAnim; }, [activeAnim]);
@@ -454,6 +504,7 @@ function LatticeApp() {
   React.useEffect(() => { runtimeVarsRef.current = runtimeVars; }, [runtimeVars]);
   React.useEffect(() => { pagesRef.current = pages; }, [pages]);
   React.useEffect(() => { viewRef.current = view; }, [view]);
+  React.useEffect(() => { timelineOpenRef.current = animValid || showScene; }, [animValid, showScene]);
 
   // Load the project's canvas from the API (falls back to localStorage boot if standalone)
   React.useEffect(() => {
@@ -479,7 +530,9 @@ function LatticeApp() {
         document.title = (d.project.name || 'Project') + ' — Lattice';
       })
       .catch(() => {})
-      .finally(() => { projectLoadedRef.current = true; });
+      // setPages(realData) already ran in .then above, so dropping the loader here reveals the real
+      // project directly — the stale localStorage seed is never shown.
+      .finally(() => { projectLoadedRef.current = true; setLoading(false); });
   }, [projectId]);
 
   // Load this account's installed library (assets/plugins). Shared across projects; enabled per project.
@@ -582,6 +635,17 @@ function LatticeApp() {
         navigate: (pageId) => setActivePageId(pageId),
         setProp: (nodeId, prop, value) => setRuntimeProps(s => ({ ...s, [nodeId]: { ...s[nodeId], [prop]: value } })),
         toast: (msg) => fireToast({ tone: 'neutral', title: msg }),
+        // Animations only run in Preview, where PreviewCanvas has published its controller.
+        playAnim: (nodeId, animId) => !!(animCtlRef.current && animCtlRef.current.playAnim(nodeId, animId)),
+        playPageAnim: (pageId) => {
+          if (pageId && pageId !== activePageIdRef.current) setActivePageId(pageId);
+          setSceneReplay(v => v + 1);
+        },
+        animNameFor: (nodeId, animId) => {
+          const n = nodesRef.current.find(x => x.id === nodeId);
+          const c = n && (n.customStates || []).find(s => s.id === animId);
+          return n && c ? `${n.name} · ${c.name}` : 'playing';
+        },
         callApi: async ({ method, url, headers, body }) => {
           try {
             const r = await fetch('/api/proxy', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, method, headers, body }) });
@@ -737,7 +801,8 @@ function LatticeApp() {
     const existing = openAnimTabsRef.current.find(t => t.nodeId === nodeId && t.stateId === stateId && t.pageId === pageId);
     if (existing) setActiveAnimId(existing.id);
     else { const id = uid('anim'); setOpenAnimTabs(ts => [...ts, { id, pageId, nodeId, stateId }]); setActiveAnimId(id); }
-    setAnimFrameIdx(0); setView('design');
+    // Land on component scope even if the scene timeline was the last thing open.
+    setSceneOpen(false); setAnimFrameIdx(0); setView('design');
   }, []);
   const closeAnimTab = React.useCallback((id) => {
     setOpenAnimTabs(ts => ts.filter(t => t.id !== id));
@@ -746,10 +811,26 @@ function LatticeApp() {
   const selectAnimTab = React.useCallback((id) => {
     const t = openAnimTabsRef.current.find(x => x.id === id);
     if (!t) return;
-    setActiveAnimId(id); setAnimFrameIdx(0); setView('design');
+    setActiveAnimId(id); setSceneOpen(false); setAnimFrameIdx(0); setView('design');
     if (t.pageId !== activePageIdRef.current) setActivePageId(t.pageId);
     setSelectedIds([t.nodeId]);
   }, []);
+
+  // The timeline editor's Component|Page scope switch. 'page' opens this page's scene timeline.
+  // 'component' returns to an already-open anim tab on this page, else opens one for the selected
+  // node's first animation state. `canComponentTimeline` below mirrors whether a target exists.
+  const componentAnimTarget = () => {
+    const tab = openAnimTabsRef.current.find(t => t.pageId === activePageIdRef.current);
+    if (tab) return { tabId: tab.id };
+    const n = nodesRef.current.find(x => x.id === selectedIdsRef.current[0]);
+    const st = n && (n.customStates || []).find(c => (c.type || 'static') === 'anim');
+    return st ? { stateId: st.id } : null;
+  };
+  const setTimelineMode = React.useCallback((m) => {
+    if (m === 'page') { setActiveAnimId(null); setSceneOpen(true); setView('design'); return; }
+    const t = componentAnimTarget(); if (!t) return;
+    if (t.tabId) selectAnimTab(t.tabId); else openAnimEditor(t.stateId);
+  }, [selectAnimTab, openAnimEditor]); // eslint-disable-line
 
   // --- Interaction-state bindings: one-click presets + assigning animations to built-in triggers ---
   // Apply a default preset to a trigger — either a static override or a freshly-bound animation.
@@ -1457,7 +1538,8 @@ function LatticeApp() {
       if (mod && k === 's') { e.preventDefault(); fireToast({ tone: 'success', title: projectId ? 'Saved to cloud' : 'Saved locally' }); return; }
       // The remaining shortcuts edit the design page's nodes — the Workflow/Code/Relationships tabs
       // (and the Run tab) have their own selection/keys, so don't let these mutate design nodes there.
-      const inDesign = viewRef.current === 'design';
+      // An open TimelineEditor renders inside the design view but binds ⌫ and ←/→ to keyframes/playhead.
+      const inDesign = viewRef.current === 'design' && !timelineOpenRef.current;
       if (mod && k === 'd') { if (inDesign) { e.preventDefault(); duplicateNodes(selectedIdsRef.current); } return; }
       if (mod && k === 'c' && !typing) { if (inDesign) copySelection(); return; }
       if (mod && k === 'v' && !typing) { if (inDesign) { e.preventDefault(); paste(); } return; }
@@ -1485,7 +1567,7 @@ function LatticeApp() {
   React.useEffect(() => {
     const t = setTimeout(() => { if (window.renderLucideIcons) window.renderLucideIcons(); }, 50);
     return () => clearTimeout(t);
-  }, [nodes.length, iconSig, view, selectedIds, previewMode, activePageId, pages.length, settingsOpen, shareOpen, editingState, activeAnimId, openAnimTabs.length]);
+  }, [nodes.length, iconSig, view, selectedIds, previewMode, activePageId, pages.length, settingsOpen, shareOpen, editingState, activeAnimId, openAnimTabs.length, collapsed.left, collapsed.right, animValid, showScene]);
 
   const sidebarStyle = {
     width: panelW.left, flex: 'none', display: 'flex', flexDirection: 'column',
@@ -1505,6 +1587,22 @@ function LatticeApp() {
     document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
     document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none';
   };
+  // Drag the handle above the timeline dock to resize it. Height is stored as a fraction of the
+  // center column so it adapts to window size; the page canvas above takes the remainder.
+  const startTimelineResize = (e) => {
+    e.preventDefault();
+    const area = timelineAreaRef.current; if (!area) return;
+    const move = (ev) => {
+      const rect = area.getBoundingClientRect();
+      setTimelineFrac(Math.max(0.2, Math.min(0.94, (rect.bottom - ev.clientY) / rect.height)));
+    };
+    const up = () => { document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); document.body.style.cursor = ''; document.body.style.userSelect = ''; };
+    document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
+    document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none';
+  };
+  const maximizeTimeline = () => setTimelineFrac(0.94); // timeline tall, page a thin strip
+  const minimizeTimeline = () => setTimelineFrac(0.28); // page tall, timeline a compact dock
+
   // Drag a horizontal divider to resize a left-panel section's height (Pages / Library). The bottom
   // section (Layers) flexes to fill whatever height remains.
   const startSectionResize = (key) => (e) => {
@@ -1545,12 +1643,17 @@ function LatticeApp() {
     setVar: (id, val) => setRuntimeVars(s => ({ ...s, [id]: val })),
   }), [runtimeVars]);
 
+  // Hold everything behind a loading screen until the cloud project is in state, so a refresh or first
+  // open never flashes the previously-cached project before it's replaced.
+  if (loading) return <ProjectLoadingScreen name={projectName} />;
+
   // Chromeless run mode (?run=1) — just the live prototype, full-window, no editor UI.
   if (runFlag) {
     return (
       <div style={{ position: 'fixed', inset: 0, display: 'flex', flexDirection: 'column', background: 'var(--bg-app)' }}>
         <PreviewCanvas nodes={viewNodes} connections={connections} artboard={artboard} device={activeDevice}
-          onAction={onPreviewAction} runtime={previewRuntime} runtimeProps={runtimeProps} pageTimeline={page.timeline} />
+          onAction={onPreviewAction} runtime={previewRuntime} runtimeProps={runtimeProps} pageTimeline={page.timeline}
+          animCtl={animCtlRef} sceneReplay={sceneReplay} />
         <WorkflowRunLog runs={runLog} onClear={() => setRunLog([])} />
         <Dialog open={!!previewDialog} onClose={() => setPreviewDialog(null)} title={previewDialog ? previewDialog.title : ''}
           footer={<Button variant="solid" size="sm" onClick={() => setPreviewDialog(null)}>Close</Button>}>
@@ -1564,6 +1667,19 @@ function LatticeApp() {
       </div>
     );
   }
+
+  // The design canvas — rendered either on its own, or above the timeline dock when one is open (so the
+  // whole page stays visible while animating). Defined once; only one instance mounts at a time.
+  const designCanvas = (
+    <Canvas
+      nodes={canvasNodes} connections={connections} settings={settings}
+      artboard={artboard} device={activeDevice}
+      selectedIds={selectedIds} onSelect={selectOne} onSelectMany={selectMany}
+      onUpdateNode={updateNode} onCommitDrag={commitDrag} onInteractStart={onInteractStart}
+      onDropComponent={dropComponent} onAddConnection={addConnection}
+      onAlign={alignNodes} onDistribute={distributeNodes} viewRef={canvasViewRef} actions={actions}
+    />
+  );
 
   return (
     <div style={{ position: 'fixed', inset: 0, display: 'flex', flexDirection: 'column', background: 'var(--bg-app)' }}>
@@ -1587,7 +1703,7 @@ function LatticeApp() {
       />
 
       <div style={{ flex: 1, display: 'flex', minHeight: 0, position: 'relative' }}>
-        {view === 'design' && (
+        {view === 'design' && !collapsed.left && (
           <aside style={sidebarStyle}>
             <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
               <div ref={pagesSecRef} style={{ height: panelH.pages == null ? 'auto' : panelH.pages, maxHeight: panelH.pages == null ? 240 : undefined, flex: 'none', overflowY: 'auto' }}>
@@ -1610,38 +1726,47 @@ function LatticeApp() {
           </aside>
         )}
 
-        {/* Center column: VS Code-style page tabs sit above the view area only, between the panels. */}
-        <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+        {/* Center column: VS Code-style page tabs sit above the view area only, between the panels.
+            position:relative anchors the floating scene-timeline toggle (bottom-right, below). */}
+        <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', position: 'relative' }}>
           {view === 'design' && (
             <PageTabs pages={pages} activePageId={activePageId} onSelectPage={selectPage} onAddPage={addPage} onRenamePage={renamePage} onDeletePage={deletePage}
-              animTabs={animTabList} activeAnimId={activeAnimId} onSelectAnim={selectAnimTab} onCloseAnim={closeAnimTab} onTearTab={startTabTear}
-              onOpenSceneTimeline={openSceneTimeline} sceneActive={showScene} />
+              animTabs={animTabList} activeAnimId={activeAnimId} onSelectAnim={selectAnimTab} onCloseAnim={closeAnimTab} onTearTab={startTabTear} />
           )}
-          {animValid ? (
-            <TimelineEditor node={animNode} state={window.ensureTracks ? window.ensureTracks(animState) : animState}
-              palette={settings.palette || []}
-              onAddTrack={animAddTrack} onDeleteTrack={animDeleteTrack}
-              onAddKey={animAddKey} onUpdateKey={animUpdateKey} onDeleteKey={animDeleteKey}
-              onSetDuration={animSetDuration} onSetLoop={animSetLoopState} />
-          ) : showScene ? (
-            <TimelineEditor pageMode pageNodes={viewNodes} palette={settings.palette || []}
-              state={{ name: 'Scene · ' + page.name, tracks: (page.timeline || {}).tracks || [], duration: (page.timeline || {}).duration || 2000, loop: (page.timeline || {}).loop !== false }}
-              onAddTrack={sceneAddTrack} onDeleteTrack={sceneDeleteTrack}
-              onAddKey={sceneAddKey} onUpdateKey={sceneUpdateKey} onDeleteKey={sceneDeleteKey}
-              onSetDuration={sceneSetDuration} onSetLoop={sceneSetLoop} />
+          {/* A timeline is docked at the bottom (inside the Design tab only) with the page canvas above,
+              so the whole page stays visible while animating. Drag the handle — or use the ⌃/⌄ buttons
+              in the transport bar — to resize; the page takes the remaining height. */}
+          {view === 'design' && (animValid || showScene) ? (
+            <div ref={timelineAreaRef} style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+              <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>{designCanvas}</div>
+              <div onMouseDown={startTimelineResize} onDoubleClick={() => setTimelineFrac(0.58)} title="Drag to resize · double-click to reset"
+                onMouseEnter={e => { e.currentTarget.style.background = 'var(--border-strong)'; }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'var(--surface)'; }}
+                style={{ height: 7, flex: 'none', cursor: 'row-resize', background: 'var(--surface)', borderTop: '1px solid var(--border-subtle)', borderBottom: '1px solid var(--border-subtle)' }} />
+              <div style={{ flexBasis: (timelineFrac * 100) + '%', flexGrow: 0, flexShrink: 0, minHeight: 0, display: 'flex' }}>
+                {animValid ? (
+                  <TimelineEditor node={animNode} state={window.ensureTracks ? window.ensureTracks(animState) : animState}
+                    palette={settings.palette || []}
+                    onAddTrack={animAddTrack} onDeleteTrack={animDeleteTrack}
+                    onAddKey={animAddKey} onUpdateKey={animUpdateKey} onDeleteKey={animDeleteKey}
+                    onSetDuration={animSetDuration} onSetLoop={animSetLoopState}
+                    onSetMode={setTimelineMode} canComponent
+                    onSetHeightMax={maximizeTimeline} onSetHeightMin={minimizeTimeline} />
+                ) : (
+                  <TimelineEditor pageMode pageNodes={viewNodes} palette={settings.palette || []}
+                    state={{ name: 'Scene · ' + page.name, tracks: (page.timeline || {}).tracks || [], duration: (page.timeline || {}).duration || 2000, loop: (page.timeline || {}).loop !== false }}
+                    onAddTrack={sceneAddTrack} onDeleteTrack={sceneDeleteTrack}
+                    onAddKey={sceneAddKey} onUpdateKey={sceneUpdateKey} onDeleteKey={sceneDeleteKey}
+                    onSetDuration={sceneSetDuration} onSetLoop={sceneSetLoop}
+                    onSetMode={setTimelineMode} canComponent={canComponentTimeline} onClose={openSceneTimeline}
+                    onSetHeightMax={maximizeTimeline} onSetHeightMin={minimizeTimeline} />
+                )}
+              </div>
+            </div>
           ) : (
             <>
-              {view === 'design' && !previewMode && (
-                <Canvas
-                  nodes={canvasNodes} connections={connections} settings={settings}
-                  artboard={artboard} device={activeDevice}
-                  selectedIds={selectedIds} onSelect={selectOne} onSelectMany={selectMany}
-                  onUpdateNode={updateNode} onCommitDrag={commitDrag} onInteractStart={onInteractStart}
-                  onDropComponent={dropComponent} onAddConnection={addConnection}
-                  onAlign={alignNodes} onDistribute={distributeNodes} viewRef={canvasViewRef} actions={actions}
-                />
-              )}
-              {view === 'design' && previewMode && <PreviewCanvas nodes={viewNodes} connections={connections} artboard={artboard} device={activeDevice} onAction={onPreviewAction} runtime={previewRuntime} runtimeProps={runtimeProps} pageTimeline={page.timeline} />}
+              {view === 'design' && !previewMode && designCanvas}
+              {view === 'design' && previewMode && <PreviewCanvas nodes={viewNodes} connections={connections} artboard={artboard} device={activeDevice} onAction={onPreviewAction} runtime={previewRuntime} runtimeProps={runtimeProps} pageTimeline={page.timeline} animCtl={animCtlRef} sceneReplay={sceneReplay} />}
               {view === 'code' && <CodePanel pages={pages} activePageId={activePageId} assets={assets} onChangeAssets={setAssets} projectName={projectName} settings={settings} />}
               {view === 'rel' && (
                 <RelationshipsView nodes={nodes} connections={connections} onSelect={(id) => { selectOne(id); setView('design'); }} />
@@ -1660,9 +1785,21 @@ function LatticeApp() {
           {view === 'design' && dockTarget && window.PreviewDock && (
             <window.PreviewDock target={dockTarget} height={dockH} onClose={() => setDock(null)} onResizeStart={startDockResize} />
           )}
+          {/* Scene-timeline toggle — floats at the bottom-right of the canvas (mirrors the zoom control
+              at bottom-left). Hidden while a timeline editor is open, since those own that corner; the
+              scene timeline is then closed from its own ✕. */}
+          {view === 'design' && !previewMode && !animValid && !showScene && (
+            <button type="button" title="Scene timeline — animate this page" onClick={openSceneTimeline}
+              style={{ position: 'absolute', bottom: 14, right: 14, zIndex: 6, width: 34, height: 34,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                background: '#1a1f2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 6,
+                color: 'rgba(255,255,255,0.6)', cursor: 'pointer', boxShadow: '0 4px 16px rgba(0,0,0,0.4)' }}>
+              <i data-lucide="clapperboard" style={{ width: 15, height: 15 }}></i>
+            </button>
+          )}
         </div>
 
-        {view === 'design' && (
+        {view === 'design' && !collapsed.right && (
           <Inspector
             width={panelW.right}
             node={animValid ? animNode : inspectorNode}
@@ -1688,8 +1825,31 @@ function LatticeApp() {
           />
         )}
 
-        {view === 'design' && resizer('left')}
-        {view === 'design' && resizer('right')}
+        {view === 'design' && !collapsed.left && resizer('left')}
+        {view === 'design' && !collapsed.right && resizer('right')}
+
+        {/* Panel collapse tabs — fully hide a side panel for more canvas space. They ride the panel edge
+            when open and sit flush at the screen edge when the panel is hidden. */}
+        {view === 'design' && (
+          <button type="button" title={collapsed.left ? 'Show left panel' : 'Hide left panel'}
+            onClick={() => setCollapsed(c => ({ ...c, left: !c.left }))}
+            style={{ position: 'absolute', top: '50%', transform: 'translateY(-50%)', left: collapsed.left ? 0 : panelW.left - 1, zIndex: 7,
+              width: 15, height: 46, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0,
+              border: '1px solid var(--border-subtle)', borderRadius: '0 6px 6px 0',
+              background: 'var(--surface)', color: 'var(--text-muted)', cursor: 'pointer' }}>
+            <i data-lucide={collapsed.left ? 'chevron-right' : 'chevron-left'} style={{ width: 13, height: 13 }}></i>
+          </button>
+        )}
+        {view === 'design' && (
+          <button type="button" title={collapsed.right ? 'Show right panel' : 'Hide right panel'}
+            onClick={() => setCollapsed(c => ({ ...c, right: !c.right }))}
+            style={{ position: 'absolute', top: '50%', transform: 'translateY(-50%)', right: collapsed.right ? 0 : panelW.right - 1, zIndex: 7,
+              width: 15, height: 46, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0,
+              border: '1px solid var(--border-subtle)', borderRadius: '6px 0 0 6px',
+              background: 'var(--surface)', color: 'var(--text-muted)', cursor: 'pointer' }}>
+            <i data-lucide={collapsed.right ? 'chevron-left' : 'chevron-right'} style={{ width: 13, height: 13 }}></i>
+          </button>
+        )}
       </div>
 
       {/* Drop zone shown while dragging a tab down — release here to open the bottom preview dock. */}

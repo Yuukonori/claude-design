@@ -548,7 +548,7 @@ window.PreviewNode = PreviewNode;
 
 function hasHover(h) { return h && (h.fill || h.textColor || h.borderColor || (h.scale && h.scale !== 100) || (h.opacity != null && h.opacity !== 100)); }
 
-function PreviewCanvas({ nodes, connections, artboard, device, onAction, runtime = null, runtimeProps = {}, pageTimeline = null }) {
+function PreviewCanvas({ nodes, connections, artboard, device, onAction, runtime = null, runtimeProps = {}, pageTimeline = null, animCtl = null, sceneReplay = 0 }) {
   const [override, setOverride] = React.useState({});
   // Workflow "Set property" nodes stash live overrides here (nodeId -> patch), applied on render.
   const applyRt = (n) => runtimeProps[n.id] ? { ...n, ...runtimeProps[n.id] } : n;
@@ -562,6 +562,11 @@ function PreviewCanvas({ nodes, connections, artboard, device, onAction, runtime
   // Time-based playback clocks for track animations bound to triggers. nodeId -> {stateId,start,dur,loop,sustain}
   const clocksRef = React.useRef({});
   const idleRef = React.useRef({});                 // nodeId -> {stateId,start,dur} looping idle track-anims
+  // Animations started imperatively by a workflow's "Play component animation" node. These aren't tied
+  // to an interaction trigger, so they win over every trigger pose until another one replaces them.
+  // A non-looping forced animation holds its last keyframe (a workflow animating a panel in should
+  // leave it in); a looping one runs until something else plays on that node.
+  const forcedRef = React.useRef({});               // nodeId -> {stateId,start,dur,loop}
   const sceneTimeRef = React.useRef(0);             // current time (ms) of the page scene timeline
   const sceneRafRef = React.useRef(0);
   const rafRef = React.useRef(0);
@@ -617,10 +622,14 @@ function PreviewCanvas({ nodes, connections, artboard, device, onAction, runtime
     const loop = () => {
       const clocks = clocksRef.current;
       const ids = Object.keys(clocks);
-      if (!ids.length && !Object.keys(idleRef.current).length) { rafRef.current = 0; return; }
+      const forcedIds = Object.keys(forcedRef.current);
+      if (!ids.length && !Object.keys(idleRef.current).length && !forcedIds.length) { rafRef.current = 0; return; }
       const now = performance.now();
       // Retire momentary animations (no loop / no sustain) once they've run their duration → revert.
       ids.forEach(id => { const c = clocks[id]; if (!c.loop && !c.sustain && now - c.start >= c.dur) delete clocks[id]; });
+      // A settled one-shot forced animation stops driving rAF but keeps its final pose (see poseFor).
+      const busy = forcedIds.some(id => { const f = forcedRef.current[id]; return f.loop || now - f.start < f.dur; });
+      if (!ids.length && !Object.keys(idleRef.current).length && !busy) { setTick(t => (t + 1) % 1000000); rafRef.current = 0; return; }
       setTick(t => (t + 1) % 1000000);
       rafRef.current = requestAnimationFrame(loop);
     };
@@ -633,6 +642,25 @@ function PreviewCanvas({ nodes, connections, artboard, device, onAction, runtime
   };
   const stopClock = (id) => { delete clocksRef.current[id]; };
   React.useEffect(() => () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); Object.values(holdTimersRef.current).forEach(clearTimeout); Object.values(pulseTimersRef.current).forEach(clearTimeout); }, []);
+
+  // Imperative channel for the workflow engine's "Play component animation" node. App owns the ref.
+  React.useEffect(() => {
+    if (!animCtl) return;
+    animCtl.current = {
+      playAnim: (nodeId, stateId) => {
+        const n = nodes.find(x => x.id === nodeId); if (!n) return false;
+        const stt = (n.customStates || []).find(c => c.id === stateId && (c.type || 'static') === 'anim');
+        if (!stt) return false;
+        forcedRef.current[nodeId] = {
+          stateId, start: performance.now(), loop: !!stt.loop,
+          dur: Math.max(1, (window.stateDuration ? window.stateDuration(stt) : 0) || 400),
+        };
+        ensureRaf();
+        return true;
+      },
+    };
+    return () => { animCtl.current = null; };
+  }, [nodes, animCtl]); // eslint-disable-line
 
   // --- Which interaction trigger is a node currently showing, and its resolved pose. -------------
   // A trigger is "usable" only if it's enabled and actually carries content (a static override or a
@@ -670,6 +698,18 @@ function PreviewCanvas({ nodes, connections, artboard, device, onAction, runtime
   // Resolve the node to its current pose: sample a bound animation over time, else merge the static
   // override, else the base node.
   const poseFor = (n) => {
+    // A workflow-driven animation outranks every interaction trigger while it's live.
+    const f = forcedRef.current[n.id];
+    if (f) {
+      const fst = (n.customStates || []).find(c => c.id === f.stateId);
+      if (fst) {
+        const d = Math.max(1, f.dur);
+        let e = performance.now() - f.start;
+        if (e >= d) e = f.loop ? e % d : d;   // loop wraps; one-shot holds the last keyframe
+        return { key: f.stateId, animing: true, rendered: window.poseAt ? window.poseAt(n, fst, e) : n };
+      }
+      delete forcedRef.current[n.id];         // the state was deleted out from under us
+    }
     const key = activeTrigger(n);
     const stt = key !== 'default' ? animOf(n, key) : null;
     if (stt) {
@@ -707,7 +747,9 @@ function PreviewCanvas({ nodes, connections, artboard, device, onAction, runtime
   // --- Page scene timeline: one clock drives many nodes' property tracks over the whole screen. -----
   const sceneTL = pageTimeline && pageTimeline.on !== false && pageTimeline.autoplay !== false && (pageTimeline.tracks || []).length ? pageTimeline : null;
   const sceneDur = sceneTL ? Math.max(1, sceneTL.duration || (window.tracksDuration ? window.tracksDuration(sceneTL.tracks) : 0)) : 0;
-  const sceneSig = sceneTL ? ((sceneTL.tracks || []).length + ':' + sceneDur + ':' + sceneTL.loop) : '';
+  // `sceneReplay` bumps when a workflow's "Play page animation" node fires — a changed sig restarts
+  // the effect below, which is exactly "replay from 0".
+  const sceneSig = sceneTL ? ((sceneTL.tracks || []).length + ':' + sceneDur + ':' + sceneTL.loop + ':' + sceneReplay) : '';
   React.useEffect(() => {
     if (!sceneTL) { sceneTimeRef.current = 0; if (sceneRafRef.current) { cancelAnimationFrame(sceneRafRef.current); sceneRafRef.current = 0; } return; }
     const start = performance.now();
@@ -747,12 +789,12 @@ function PreviewCanvas({ nodes, connections, artboard, device, onAction, runtime
   // State overrides are applied by re-rendering the merged node (below); this only supplies the
   // transition so the change animates. Targets descendants too, since fill/scale/etc. live inside
   // PreviewNode. Timing comes from the *active* state, so entering and leaving can differ.
-  const stateCSS = visible.filter(n => n.states || n.hover || animState(n) || idleAnimOf(n) || hasScene(n)).map(n => {
+  const stateCSS = visible.filter(n => n.states || n.hover || animState(n) || idleAnimOf(n) || hasScene(n) || forcedRef.current[n.id]).map(n => {
     const cs = animState(n);
     if (cs) { const fi = frameIdx[n.id] || 0; const fr = cs.frames[fi]; const dur = (fr && fr.dur) || 400; const ease = (fr && fr.ease) || 'linear'; return `[data-nid="${n.id}"],[data-nid="${n.id}"] *{transition:all ${dur}ms ${ease}}`; }
     // A track animation samples every frame in JS, so suppress CSS transitions while it plays; a
     // static state tweens via CSS using the active trigger's timing.
-    if (clocksRef.current[n.id] || idleAnimOf(n) || hasScene(n)) return `[data-nid="${n.id}"],[data-nid="${n.id}"] *{transition:none}`;
+    if (clocksRef.current[n.id] || forcedRef.current[n.id] || idleAnimOf(n) || hasScene(n)) return `[data-nid="${n.id}"],[data-nid="${n.id}"] *{transition:none}`;
     const t = window.stateTiming ? window.stateTiming(n, activeTrigger(n)) : { dur: 150, ease: 'ease-out' };
     return `[data-nid="${n.id}"],[data-nid="${n.id}"] *{transition:all ${t.dur}ms ${t.ease}}`;
   }).join('\n');

@@ -21,6 +21,8 @@ const WORKFLOW_NODE_TYPES = {
   navigate:  { label: 'Navigate',     icon: 'corner-up-right', accent: 'var(--green-base)', inputs: 1, out: ['next'] },
   setProp:   { label: 'Set property', icon: 'sliders',         accent: 'var(--blue-base)',  inputs: 1, out: ['next'] },
   toast:     { label: 'Toast',        icon: 'message-square',  accent: 'var(--red-base)',   inputs: 1, out: ['next'] },
+  playAnim:     { label: 'Play component animation', icon: 'film',        accent: 'var(--amber-base)', inputs: 1, out: ['next'] },
+  playPageAnim: { label: 'Play page animation',      icon: 'clapperboard', accent: 'var(--amber-base)', inputs: 1, out: ['next'] },
 };
 window.WORKFLOW_NODE_TYPES = WORKFLOW_NODE_TYPES;
 
@@ -44,6 +46,8 @@ function newWorkflowNode(type, x, y) {
     case 'navigate': return { ...base, pageId: '' };
     case 'setProp':  return { ...base, targetNodeId: '', prop: 'label', value: '' };
     case 'toast':    return { ...base, message: '' };
+    case 'playAnim': return { ...base, targetNodeId: '', animId: '' };
+    case 'playPageAnim': return { ...base, pageId: '' };
     default:         return base; // trigger
   }
 }
@@ -109,6 +113,8 @@ window.evalCondition = evalCondition;
 //   onVarChange(id, value)                push a write to the React runtime store
 //   navigate(pageId)  setProp(nodeId, prop, value)  toast(message)
 //   callApi({method,url,headers,body}) -> Promise<{status, ok, body}>
+//   playAnim(nodeId, animId) -> bool     play one node's animation state (false = not found)
+//   playPageAnim(pageId)                 replay a page's scene timeline from 0
 // }
 async function execWorkflow(workflow, ctx) {
   if (!workflow || !Array.isArray(workflow.nodes)) return;
@@ -184,6 +190,18 @@ async function execWorkflow(workflow, ctx) {
           const msg = resolveTemplate(cur.message, scope) || 'Done';
           if (ctx.toast) ctx.toast(msg);
           log({ label: 'Toast', tone: 'info', text: msg });
+          break;
+        }
+        case 'playAnim': {
+          const ok = cur.targetNodeId && cur.animId && ctx.playAnim ? ctx.playAnim(cur.targetNodeId, cur.animId) : false;
+          log(ok
+            ? { label: 'Play component animation', tone: 'success', text: ctx.animNameFor ? ctx.animNameFor(cur.targetNodeId, cur.animId) : 'playing' }
+            : { label: 'Play component animation', tone: 'warning', text: 'nothing played — pick a component + animation, and make sure that component is on the page being previewed' });
+          break;
+        }
+        case 'playPageAnim': {
+          if (ctx.playPageAnim) ctx.playPageAnim(cur.pageId || null);
+          log({ label: 'Play page animation', tone: 'success', text: `↻ ${pageName(cur.pageId) || 'current page'}` });
           break;
         }
         default: log({ label: 'Trigger', tone: 'info', text: 'workflow started' }); break;

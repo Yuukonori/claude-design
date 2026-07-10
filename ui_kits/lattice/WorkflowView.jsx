@@ -41,7 +41,11 @@ function WorkflowView({
   const merged = [...(variables || []).map(v => ({ ...v, scopeLabel: 'Global' })),
                   ...(pageVars || []).map(v => ({ ...v, scopeLabel: pageName || 'Page' }))];
   const varOptions = [{ value: '', label: 'Select variable…' }, ...merged.map(v => ({ value: v.id, label: `${v.name} · ${v.scopeLabel}` }))];
-  const allPageNodes = (pages || []).flatMap(p => (p.nodes || []).map(n => ({ id: n.id, label: `${p.name} / ${n.name}` })));
+  // `anims` lets the Play-component-animation node offer only the animation states a node actually owns.
+  const allPageNodes = (pages || []).flatMap(p => (p.nodes || []).map(n => ({
+    id: n.id, label: `${p.name} / ${n.name}`,
+    anims: (n.customStates || []).filter(c => (c.type || 'static') === 'anim').map(c => ({ id: c.id, name: c.name })),
+  })));
 
   React.useEffect(() => { if (window.renderLucideIcons) window.renderLucideIcons(); });
 
@@ -189,6 +193,12 @@ function WorkflowView({
       case 'navigate': { const p = (pages || []).find(x => x.id === n.pageId); return p ? `→ ${p.name}` : 'pick a page'; }
       case 'setProp':  { const t = allPageNodes.find(x => x.id === n.targetNodeId); return t ? `${t.label}.${n.prop}` : 'set a property'; }
       case 'toast':    return n.message || 'show a message';
+      case 'playAnim': {
+        const t = allPageNodes.find(x => x.id === n.targetNodeId);
+        const a = t && (t.anims || []).find(c => c.id === n.animId);
+        return a ? `${t.label} · ${a.name}` : 'pick a component + animation';
+      }
+      case 'playPageAnim': { const p = (pages || []).find(x => x.id === n.pageId); return p ? `↻ ${p.name}` : '↻ current page'; }
       default: return '';
     }
   };
@@ -371,6 +381,30 @@ function NodeConfig({ node, onChange, varOptions, merged, pages, allPageNodes })
         {node.type === 'toast' && (
           <Field label="Message"><Input size="sm" placeholder="Welcome, {{username}}!" value={node.message || ''} onChange={e => set('message')(e.target.value)} /></Field>
         )}
+
+        {node.type === 'playAnim' && (() => {
+          const target = allPageNodes.find(n => n.id === node.targetNodeId);
+          const anims = (target && target.anims) || [];
+          return <>
+            <Field label="Component">
+              <Select size="sm" options={[{ value: '', label: 'Select component…' }, ...allPageNodes.map(n => ({ value: n.id, label: n.label }))]}
+                value={node.targetNodeId || ''} onChange={e => onChange({ targetNodeId: e.target.value, animId: '' })} />
+            </Field>
+            <Field label="Animation">
+              <Select size="sm" disabled={!anims.length}
+                options={anims.length ? [{ value: '', label: 'Select animation…' }, ...anims.map(a => ({ value: a.id, label: a.name }))] : [{ value: '', label: 'No animations on this component' }]}
+                value={node.animId || ''} onChange={e => set('animId')(e.target.value)} />
+            </Field>
+            <Note>{target && !anims.length
+              ? <>“{target.label}” has no animation states. Add one in the Design tab: select it, open <b>Interaction state → ＋ New custom state</b>, set Type to <b>Animation</b>.</>
+              : <>Plays the state once. If the animation has <b>Loop</b> on, it keeps looping until another animation plays on this component.</>}</Note>
+          </>;
+        })()}
+
+        {node.type === 'playPageAnim' && <>
+          <Field label="Page"><Select size="sm" options={[{ value: '', label: 'Current page' }, ...pages.map(p => ({ value: p.id, label: p.name }))]} value={node.pageId || ''} onChange={e => set('pageId')(e.target.value)} /></Field>
+          <Note>Replays that page's scene timeline from 0 — the one you author with the <b>Page</b> scope in the timeline editor. Picking a different page navigates to it first.</Note>
+        </>}
       </div>
     </div>
   );

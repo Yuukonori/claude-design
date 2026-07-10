@@ -181,7 +181,7 @@ window.Topbar = Topbar;
 
 // VS Code-style page tabs — rendered above the canvas column only (not across the side panels).
 // Also hosts transient "animation editor" tabs (film icon) that open beside the page tabs.
-function PageTabs({ pages = [], activePageId, onSelectPage, onAddPage, onRenamePage, onDeletePage, animTabs = [], activeAnimId, onSelectAnim, onCloseAnim, onTearTab, onOpenSceneTimeline, sceneActive = false }) {
+function PageTabs({ pages = [], activePageId, onSelectPage, onAddPage, onRenamePage, onDeletePage, animTabs = [], activeAnimId, onSelectAnim, onCloseAnim, onTearTab }) {
   const { Tooltip } = window.LatticeDesignSystem_e801cb;
   const [editId, setEditId] = React.useState(null);
   const [draft, setDraft] = React.useState('');
@@ -248,14 +248,6 @@ function PageTabs({ pages = [], activePageId, onSelectPage, onAddPage, onRenameP
           );
         })}
       </div>
-      {onOpenSceneTimeline && (
-        <Tooltip label="Scene timeline — animate this page">
-          <button type="button" title="Scene timeline" onClick={onOpenSceneTimeline}
-            style={{ ...pageAddStyle, ...(sceneActive ? { color: 'var(--blue-base)', background: 'var(--surface-hover)' } : null) }}>
-            <i data-lucide="clapperboard" style={{ width: 14, height: 14 }}></i>
-          </button>
-        </Tooltip>
-      )}
       {onAddPage && (
         <Tooltip label="New page">
           <button type="button" title="New page" onClick={onAddPage} style={pageAddStyle}>
