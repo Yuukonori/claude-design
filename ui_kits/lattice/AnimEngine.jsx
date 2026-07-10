@@ -15,8 +15,10 @@ const EASE = {
 function applyEase(name, u) { const f = EASE[name] || EASE['ease-out']; return f(Math.max(0, Math.min(1, u))); }
 
 // Props that interpolate as colours vs. those that can only step (discrete / structural).
-const COLOR_PROPS = new Set(['fillColor', 'textColor', 'borderColor', 'textStrokeColor', 'chartColor', 'placeholderColor']);
-const STEP_PROPS = new Set(['flipH', 'flipV', 'borderStyle', 'blendMode', 'radii', 'gradient', 'effects', 'textShadows', 'textGradient']);
+const COLOR_PROPS = new Set(['fillColor', 'textColor', 'borderColor', 'textStrokeColor', 'chartColor', 'placeholderColor', 'btnIconColor', 'iconColor']);
+const STEP_PROPS = new Set(['flipH', 'flipV', 'borderStyle', 'blendMode', 'radii', 'gradient', 'effects', 'textShadows', 'textGradient',
+  'iconName', 'btnIcon', 'label', 'text', 'src',
+  'variant', 'btnSize', 'btnIconPos', 'fullWidth', 'disabled', 'btnIconFlipH', 'btnIconFlipV', 'iconFlipH', 'iconFlipV']); // glyph/content/enum/bool swaps hold until their key, then flip
 
 function lerpNum(a, b, u) { return a + (b - a) * u; }
 

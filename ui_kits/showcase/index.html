@@ -1,0 +1,81 @@
+<!-- @dsCard group="Lattice" viewport="1280x800" name="Showcase — auth & dashboard" subtitle="Login, register & dashboard exercising every DS component" -->
+<!-- @startingPoint section="Lattice" subtitle="3-page flow: login, register, dashboard — all 14 components + animations" viewport="1280x800" -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<base href="/ui_kits/showcase/">
+<title>Lattice — Showcase</title>
+<meta name="theme-color" content="#0a0a0c">
+<link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+<script src="https://unpkg.com/lucide@latest"></script>
+<script>
+// Fill each <i data-lucide> in place (svg as a child) instead of replacing it, so React keeps
+// owning the <i> and never hits "removeChild: node not a child" on re-render/unmount.
+window.renderLucideIcons = function (root) {
+  var L = window.lucide;
+  if (!L || !L.createElement) { if (L && L.createIcons) L.createIcons(); return; }
+  var toPascal = function (name) {
+    return name.split('-').map(function (p) { return p ? p.charAt(0).toUpperCase() + p.slice(1) : ''; }).join('');
+  };
+  var els = (root || document).querySelectorAll('[data-lucide]');
+  for (var i = 0; i < els.length; i++) {
+    var el = els[i];
+    var name = el.getAttribute('data-lucide');
+    if (el.getAttribute('data-licon') === name) continue;
+    var node = (L.icons && L.icons[toPascal(name)]) || L[toPascal(name)];
+    if (!node) continue;
+    var svg;
+    try { svg = L.createElement(node); } catch (e) { continue; }
+    if (!svg) continue;
+    if (el.style && el.style.width)  svg.setAttribute('width', parseFloat(el.style.width));
+    if (el.style && el.style.height) svg.setAttribute('height', parseFloat(el.style.height));
+    svg.style.display = 'block';
+    while (el.firstChild) el.removeChild(el.firstChild);
+    el.appendChild(svg);
+    el.setAttribute('data-licon', name);
+  }
+};
+</script>
+<style>
+  html, body { margin: 0; min-height: 100%; background: var(--bg-app); }
+  a { color: inherit; text-decoration: none; }
+  ::selection { background: var(--selection-bg); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" src="showcase_core.jsx" data-presets="react"></script>
+<script type="text/babel" src="showcase_login.jsx" data-presets="react"></script>
+<script type="text/babel" src="showcase_register.jsx" data-presets="react"></script>
+<script type="text/babel" src="showcase_dashboard.jsx" data-presets="react"></script>
+<script type="text/babel" src="showcase_app.jsx" data-presets="react"></script>
+<script type="text/babel" data-presets="react">
+  class ErrBoundary extends React.Component {
+    constructor(p) { super(p); this.state = { err: null }; }
+    static getDerivedStateFromError(err) { return { err }; }
+    componentDidCatch(err) { console.error(err); }
+    render() {
+      if (this.state.err) return (
+        <pre style={{ position: 'fixed', inset: 0, margin: 0, padding: 24, overflow: 'auto', background: '#160b0b', color: '#ff9d9d', font: '12px/1.6 monospace', whiteSpace: 'pre-wrap', zIndex: 99999 }}>
+          {'Something crashed:\n\n' + (this.state.err.stack || this.state.err)}
+        </pre>
+      );
+      return this.props.children;
+    }
+  }
+  const mount = () => {
+    if (!window.ShowcaseApp) return setTimeout(mount, 30);
+    if (!window.location.hash) window.location.hash = '/login';
+    ReactDOM.createRoot(document.getElementById('root')).render(<ErrBoundary><ShowcaseApp /></ErrBoundary>);
+    setTimeout(() => window.renderLucideIcons && window.renderLucideIcons(), 80);
+  };
+  mount();
+</script>
+</body>
+</html>

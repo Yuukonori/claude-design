@@ -8,6 +8,12 @@
       "port": 5050
     },
     {
+      "name": "app",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "autoPort": true
+    },
+    {
       "name": "static",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "static"],
