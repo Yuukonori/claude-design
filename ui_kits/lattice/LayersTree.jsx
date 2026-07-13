@@ -1,7 +1,7 @@
 /* global React, ContextMenu */
 // Left panel — nested layers tree derived from `child` connections.
 // Expand/collapse, inline rename, visibility & lock toggles, drag reorder/reparent, context menu.
-function LayersTree({ nodes, connections, selectedIds = [], onSelect, onSelectMany, onRename, onSetParent, onToggleVisibility, onToggleLock, onReorder, actions }) {
+function LayersTree({ nodes, connections, selectedIds = [], onSelect, onSelectMany, onRename, onSetParent, onToggleVisibility, onToggleLock, onReorder, onReorderMany, actions }) {
   const { Badge } = window.LatticeDesignSystem_e801cb;
   const [collapsed, setCollapsed] = React.useState(() => new Set());
   const [editingId, setEditingId] = React.useState(null);
@@ -57,7 +57,15 @@ function LayersTree({ nodes, connections, selectedIds = [], onSelect, onSelectMa
   const onRowDrop = (e, n) => {
     e.preventDefault();
     const dragId = dragIdRef.current;
-    if (dragId && drop) onReorder(dragId, n.id, drop.mode);
+    if (dragId && drop) {
+      // If the grabbed row is part of a multi-selection, move the whole selection together;
+      // otherwise fall back to moving just the row that was physically dragged.
+      if (onReorderMany && selectedIds.length > 1 && selectedIds.includes(dragId)) {
+        onReorderMany(selectedIds, n.id, drop.mode);
+      } else {
+        onReorder(dragId, n.id, drop.mode);
+      }
+    }
     dragIdRef.current = null;
     setDrop(null);
   };

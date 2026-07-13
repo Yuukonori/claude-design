@@ -1,4 +1,4 @@
-/* global React, gradientCss */
+/* global React, ReactDOM, gradientCss */
 // Color control — pick from the project palette, design tokens, or a custom hex. Value is a hex
 // string or a `var(--token)` string (both work directly as an inline-style background/color).
 // When `allowGradient` is set (Fill only), it also edits a linear/radial gradient descriptor
@@ -38,11 +38,18 @@ function ModeTab({ label, active, onClick }) {
 function ColorField({ value, onChange, palette = [], allowNone = true, allowGradient = false, gradient = null, onGradient }) {
   const [open, setOpen] = React.useState(false);
   const [hex, setHex] = React.useState(value && value[0] === '#' ? value : '#ffffff');
-  const ref = React.useRef(null);
+  const [pos, setPos] = React.useState(null);   // fixed-position rect for the portalled popover
+  const ref = React.useRef(null);                // anchor (the field container)
+  const popRef = React.useRef(null);             // the portalled popover (lives on <body>)
   React.useEffect(() => { if (value && value[0] === '#') setHex(value); }, [value]);
   React.useEffect(() => {
     if (!open) return;
-    const on = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    // Outside-click closes. The popover is portalled out of `ref`, so check it separately.
+    const on = (e) => {
+      if (ref.current && ref.current.contains(e.target)) return;
+      if (popRef.current && popRef.current.contains(e.target)) return;
+      setOpen(false);
+    };
     const t = setTimeout(() => document.addEventListener('mousedown', on), 0);
     return () => { clearTimeout(t); document.removeEventListener('mousedown', on); };
   }, [open]);
@@ -51,8 +58,39 @@ function ColorField({ value, onChange, palette = [], allowNone = true, allowGrad
   const mode = (gEnabled && gradient && gradient.type) ? gradient.type : 'solid';
   const gradPreview = gEnabled && gradient ? window.gradientCss(gradient) : null;
 
+  // The popover is portalled to <body> and positioned `fixed` so the Inspector's own `overflow:auto`
+  // scroll container can't clip it: the panel is only 280px wide, and a right-aligned 250px gradient
+  // popover would otherwise spill past — and get cut off at — the panel's left edge. We right-align to
+  // the field, clamp inside the viewport, and flip above when there isn't room below.
+  const popW = mode !== 'solid' ? 250 : 214;
+  React.useLayoutEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const r = ref.current && ref.current.getBoundingClientRect();
+      if (!r) return;
+      const vw = window.innerWidth, vh = window.innerHeight, M = 8;
+      const left = Math.max(M, Math.min(r.right - popW, vw - popW - M));
+      const below = vh - r.bottom - M, above = r.top - M;
+      const down = below >= 220 || below >= above;
+      const maxH = Math.max(120, Math.min(480, vh * 0.72, down ? below : above));
+      setPos({ left, width: popW, maxH, top: down ? r.bottom + 4 : Math.max(M, r.top - 4 - maxH) });
+    };
+    place();
+    window.addEventListener('scroll', place, true);
+    window.addEventListener('resize', place);
+    return () => { window.removeEventListener('scroll', place, true); window.removeEventListener('resize', place); };
+  }, [open, popW]);
+
   const pick = (v) => { onChange(v); setOpen(false); };
   const clear = () => { onChange(''); if (gEnabled) onGradient(null); };
+  // Screen eyedropper — sample any pixel on screen via the native EyeDropper API (Chromium). Applies the
+  // sampled hex as the solid fill; the button is only rendered where the API exists (see below).
+  const pickScreen = async () => {
+    try {
+      const res = await new window.EyeDropper().open();
+      if (res && res.sRGBHex) { setHex(res.sRGBHex); onChange(res.sRGBHex); }
+    } catch (e) { /* user dismissed the picker (Esc) — nothing to do */ }
+  };
 
   const setMode = (m) => {
     if (m === 'solid') { onGradient(null); return; }
@@ -75,8 +113,8 @@ function ColorField({ value, onChange, palette = [], allowNone = true, allowGrad
         style={{ flex: 1, fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{gradPreview ? (mode + ' gradient') : (value || 'none')}</span>
       {(value || gradPreview) && allowNone && <button type="button" title="Clear" onClick={clear} style={{ border: 0, background: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 14, lineHeight: 1, padding: 0, flex: 'none' }}>×</button>}
 
-      {open && (
-        <div style={{ position: 'absolute', top: '108%', right: 0, zIndex: 400, width: mode !== 'solid' ? 250 : 214, maxHeight: 'min(72vh, 480px)', overflowY: 'auto', background: 'var(--surface-raised)', border: '1px solid var(--border-default)', boxShadow: 'var(--shadow-overlay)', padding: 10 }}>
+      {open && pos && ReactDOM.createPortal(
+        <div ref={popRef} style={{ position: 'fixed', top: pos.top, left: pos.left, zIndex: 500, width: pos.width, maxHeight: pos.maxH, overflowY: 'auto', background: 'var(--surface-raised)', border: '1px solid var(--border-default)', boxShadow: 'var(--shadow-overlay)', padding: 10 }}>
           {gEnabled && (
             <div style={{ display: 'flex', gap: 0, marginBottom: 10 }}>
               <ModeTab label="Solid" active={mode === 'solid'} onClick={() => setMode('solid')} />
@@ -134,13 +172,24 @@ function ColorField({ value, onChange, palette = [], allowNone = true, allowGrad
               <div style={eb}>Custom</div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <input type="color" title="Custom color" value={hex} onChange={e => { setHex(e.target.value); onChange(e.target.value); }}
-                  style={{ width: 26, height: 26, padding: 0, border: 0, background: 'none', cursor: 'pointer' }} />
+                  style={{ width: 26, height: 26, flex: 'none', padding: 0, border: 0, background: 'none', cursor: 'pointer' }} />
                 <input value={hex} title="Hex" onChange={e => { setHex(e.target.value); if (/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(e.target.value)) onChange(e.target.value); }}
-                  style={{ flex: 1, height: 26, boxSizing: 'border-box', padding: '0 7px', border: '1px solid var(--border-subtle)', background: 'var(--surface-inset)', color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', fontSize: 12, outline: 'none' }} />
+                  style={{ flex: 1, minWidth: 0, height: 26, boxSizing: 'border-box', padding: '0 7px', border: '1px solid var(--border-subtle)', background: 'var(--surface-inset)', color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', fontSize: 12, outline: 'none' }} />
+                {window.EyeDropper && (
+                  <button type="button" title="Pick a colour from anywhere on screen" onClick={pickScreen}
+                    style={{ width: 26, height: 26, flex: 'none', display: 'grid', placeItems: 'center', border: '1px solid var(--border-subtle)', background: 'var(--surface-inset)', color: 'var(--text-secondary)', cursor: 'pointer', borderRadius: 3 }}>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="m12 9-8.414 8.414A2 2 0 0 0 3 18.828v1.344a2 2 0 0 1-.586 1.414A2 2 0 0 1 3.828 21h1.344a2 2 0 0 0 1.414-.586L15 12" />
+                      <path d="m18 9 .4.4a1 1 0 1 1-3 3l-3.8-3.8a1 1 0 1 1 3-3l.4.4 3.4-3.4a1 1 0 1 1 3 3z" />
+                      <path d="m2 22 .414-.414" />
+                    </svg>
+                  </button>
+                )}
               </div>
             </>
           )}
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

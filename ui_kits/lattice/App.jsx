@@ -211,6 +211,36 @@ function captureVariantProps(node) {
   return o;
 }
 
+// --- Asset persistence (IndexedDB) ----------------------------------------------------------------
+// Image/font assets are base64 data URLs — routinely several MB, far past localStorage's ~5MB origin
+// quota. Bundling them into the single `lattice_project_v2` key made setItem throw QuotaExceededError,
+// which was swallowed silently — so the WHOLE project (pages + scaffold + assets) failed to save and
+// every reload fell back to defaults (hence re-"Initialize project" and lost uploads). Assets now live
+// in IndexedDB (hundreds of MB+); the light structural project stays in localStorage for instant boot.
+const IDB_NAME = 'lattice_editor', IDB_STORE = 'kv', IDB_ASSETS_KEY = 'assets_v1';
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') return reject(new Error('no indexedDB'));
+    let req;
+    try { req = indexedDB.open(IDB_NAME, 1); } catch (e) { return reject(e); }
+    req.onupgradeneeded = () => { const db = req.result; if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE); };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+function idbGet(key) {
+  return idbOpen().then(db => new Promise((resolve, reject) => {
+    const r = db.transaction(IDB_STORE, 'readonly').objectStore(IDB_STORE).get(key);
+    r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error);
+  })).catch(() => undefined);
+}
+function idbSet(key, val) {
+  return idbOpen().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite'); tx.objectStore(IDB_STORE).put(val, key);
+    tx.oncomplete = () => resolve(true); tx.onerror = () => reject(tx.error);
+  })).catch(() => false);
+}
+
 function loadState() {
   try {
     const v2 = JSON.parse(localStorage.getItem('lattice_project_v2'));
@@ -320,6 +350,11 @@ function LatticeApp() {
 
   const [view, setView] = React.useState('design');
   const [previewMode, setPreviewMode] = React.useState(false);
+  // Run system (popup windows): active toggles Run↔Stop; refs hold the webpage + debug-console windows.
+  const [runState, setRunState] = React.useState({ active: false, paused: false, debug: false });
+  const runWinRef = React.useRef(null);
+  const conWinRef = React.useRef(null);
+  const runPollRef = React.useRef(null);
   const [activeDevice, setActiveDevice] = React.useState('desktop');
   const [orient, setOrient] = React.useState({ desktop: 'landscape', tablet: 'landscape', mobile: 'portrait', custom: 'landscape' });
   const [selectedIds, setSelectedIds] = React.useState(['cmp_card']);
@@ -332,10 +367,6 @@ function LatticeApp() {
   const [animFrameIdx, setAnimFrameIdx] = React.useState(0);         // selected keyframe in the active anim tab
   const [sceneOpen, setSceneOpen] = React.useState(false);           // page scene-timeline editor open
   const [sceneReplay, setSceneReplay] = React.useState(0);           // bumped to restart Preview's scene timeline
-  const [dock, setDock] = React.useState(null);                      // torn-off tab preview dock: {type,pageId,nodeId?,stateId?}
-  const [dockH, setDockH] = React.useState(220);                     // dock height (drag to resize)
-  const [tearing, setTearing] = React.useState(false);               // dragging a tab toward the bottom drop zone
-  const tearRef = React.useRef(null);
   const [panelW, setPanelW] = React.useState(() => {                 // resizable side-panel widths (per-user)
     try { return { left: 280, right: 280, ...JSON.parse(localStorage.getItem('lattice_panels') || '{}') }; } catch { return { left: 280, right: 280 }; }
   });
@@ -424,18 +455,6 @@ function LatticeApp() {
     const cs = n && (n.customStates || []).find(c => c.id === t.stateId);
     return { id: t.id, label: (cs && cs.name) || 'Animation' };
   });
-  // Resolve the bottom dock's descriptor to the live node/state (anim) or page it should preview.
-  const dockTarget = React.useMemo(() => {
-    if (!dock) return null;
-    const pg = pages.find(p => p.id === dock.pageId);
-    if (!pg) return null;
-    if (dock.type === 'anim') {
-      const n = (pg.nodes || []).find(x => x.id === dock.nodeId) || null;
-      const st = (n && (n.customStates || []).find(c => c.id === dock.stateId)) || null;
-      return { type: 'anim', node: n, state: st };
-    }
-    return { type: 'page', page: pg };
-  }, [dock, pages]);
   // Artboard size = custom size as-is, or a preset oriented portrait/landscape.
   const artboard = React.useMemo(() => {
     if (activeDevice === 'custom') return (settings.customSize && settings.customSize.w) ? settings.customSize : { w: 1200, h: 800 };
@@ -487,6 +506,7 @@ function LatticeApp() {
   const pagesRef = React.useRef(pages);
   const viewRef = React.useRef(view);
   const timelineOpenRef = React.useRef(false); // a TimelineEditor covers the canvas — it owns ⌫ and ←/→
+  const timelinePlayheadRef = React.useRef(0);  // live playhead (ms) of the open timeline; read when the Inspector keys a property
   const animCtlRef = React.useRef(null);       // PreviewCanvas publishes { playAnim } here while mounted
   React.useEffect(() => { editingStateRef.current = editingState; }, [editingState]);
   React.useEffect(() => { openAnimTabsRef.current = openAnimTabs; }, [openAnimTabs]);
@@ -524,6 +544,7 @@ function LatticeApp() {
         setCustomComponents(c.customComponents || []);
         setCustomShaders(c.customShaders || []);
         setEnabledLibrary(c.enabledLibrary || []);
+        setAssets(c.assets || []);   // the save sends assets; without this they're dropped on every open (scaffold + uploads lost → forced re-init)
         setActiveWorkflowId((c.workflows || [])[0]?.id || null);
         setSelectedIds([]);
         setProjectName(d.project.name || '');
@@ -683,6 +704,20 @@ function LatticeApp() {
     bumpHistory();
   }, []);
 
+  // Coalesce rapid Inspector edits into a single undo step: snapshot only when the edited field changes
+  // or the pointer/keyboard goes idle past the window — so dragging a slider or typing a word is one undo,
+  // while each distinct field is its own step. Node-based edits only (matches the nodes+connections snapshot).
+  const editHistRef = React.useRef({ t: 0, key: '' });
+  const coalesceHistory = React.useCallback((key) => {
+    const now = Date.now();
+    const last = editHistRef.current;
+    if (key !== last.key || now - last.t > 600) pushHistory();
+    editHistRef.current = { t: now, key };
+  }, [pushHistory]);
+  // Force the next edit to open a fresh undo step (e.g. after a selection change), so unrelated edits
+  // never merge just because they happened close together.
+  const breakEditHistory = React.useCallback(() => { editHistRef.current = { t: 0, key: '' }; }, []);
+
   const applySnapshot = React.useCallback((snap) =>
     setPages(ps => ps.map(p => p.id === activePageIdRef.current
       ? { ...p, nodes: snap.nodes, connections: snap.connections } : p)), []);
@@ -744,12 +779,52 @@ function LatticeApp() {
     }
   }, [updateNode, setNodes]);
 
+  // Inspector edit entry points that record a (coalesced) undo step before mutating. These wrap the
+  // history-free mutators so property-panel changes — colours, sizes, toggles, typography, renames —
+  // are undoable, keyed per node+field so a burst of tweaks to one field collapses to a single step.
+  const inspChange = React.useCallback((id, patch) => {
+    coalesceHistory('e:' + id + ':' + Object.keys(patch).sort().join(','));
+    return editNode(id, patch);
+  }, [coalesceHistory, editNode]);
+  const inspBaseChange = React.useCallback((id, patch) => {
+    coalesceHistory('b:' + id + ':' + Object.keys(patch).sort().join(','));
+    return updateNode(id, patch);
+  }, [coalesceHistory, updateNode]);
+  const inspRename = React.useCallback((id, name) => {
+    coalesceHistory('r:' + id);
+    return renameNode(id, name);
+  }, [coalesceHistory, renameNode]);
+  // While a component timeline is open, Inspector visual edits scope to that animation state's own
+  // override layer (node.states[stateId]) — the resting pose its tracks animate over — instead of the
+  // shared base, so they never leak into Default or other states. Geometry still writes through to the
+  // active device layer. Mirrors editNode, but targets the open anim tab's node + state.
+  const inspAnimStateChange = React.useCallback((id, patch) => {
+    const t = activeAnimRef.current;
+    if (!t || id !== t.nodeId) return inspBaseChange(id, patch);
+    coalesceHistory('a:' + t.stateId + ':' + id + ':' + Object.keys(patch).sort().join(','));
+    const geom = {}, ov = {};
+    for (const k in patch) (GEOM_KEYS.includes(k) ? geom : ov)[k] = patch[k];
+    if (Object.keys(geom).length) updateNode(id, geom);
+    if (Object.keys(ov).length) {
+      const st = t.stateId;
+      setNodes(ns => ns.map(n => n.id === id ? { ...n, states: { ...n.states, [st]: { ...(n.states && n.states[st]), ...ov } } } : n));
+    }
+  }, [inspBaseChange, coalesceHistory, updateNode, setNodes]);
+
   const resetState = React.useCallback((id, st) =>
     setNodes(ns => ns.map(n => {
       if (n.id !== id || !n.states) return n;
       const rest = { ...n.states }; delete rest[st];
       return { ...n, states: rest };
     })), [setNodes]);
+
+  // Enable/disable a state (built-in or custom). Always writes the `off` flag into node.states[stateKey]
+  // — never the node base — so it works identically whether or not the timeline editor is open, and only
+  // toggles availability (it never touches customStates, so a disabled custom state is never lost).
+  const setStateEnabled = React.useCallback((id, stateKey, on) =>
+    setNodes(ns => ns.map(n => n.id === id
+      ? { ...n, states: { ...n.states, [stateKey]: { ...(n.states && n.states[stateKey]), off: !on } } }
+      : n)), [setNodes]);
 
   // Drop any open animation tabs whose node/state/page no longer exists (and deactivate if the active one goes).
   const pruneAnimTabs = React.useCallback((keep) => {
@@ -877,41 +952,6 @@ function LatticeApp() {
     setBinding(value);                           // assign an existing animation by id
   }, [setNodes, openAnimEditor]);
 
-  // --- Bottom preview dock: drag a page/anim tab down past the drop zone to open a live preview ---
-  const openDockFor = React.useCallback((d) => {
-    if (!d) return;
-    if (d.type === 'anim') {
-      const t = openAnimTabsRef.current.find(x => x.id === d.animTabId);
-      if (t) setDock({ type: 'anim', pageId: t.pageId, nodeId: t.nodeId, stateId: t.stateId });
-    } else if (d.type === 'page') {
-      setDock({ type: 'page', pageId: d.pageId });
-    }
-  }, []);
-  // Started on a tab's mousedown; arms once the pointer is dragged down, docks if released in the zone.
-  const startTabTear = React.useCallback((descriptor, e) => {
-    if (e.button !== 0) return;
-    if (e.target.closest && e.target.closest('button, input')) return; // leave close/rename alone
-    const sy = e.clientY, data = { armed: false };
-    tearRef.current = data;
-    const move = (ev) => {
-      if (!tearRef.current) return;
-      if (!data.armed && ev.clientY - sy > 22) { data.armed = true; setTearing(true); document.body.style.userSelect = 'none'; }
-    };
-    const up = (ev) => {
-      document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up);
-      document.body.style.userSelect = ''; tearRef.current = null;
-      if (data.armed) { setTearing(false); if (ev.clientY > window.innerHeight - 150) openDockFor(descriptor); }
-    };
-    document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
-  }, [openDockFor]);
-  const startDockResize = (e) => {
-    e.preventDefault();
-    const sy = e.clientY, h0 = dockH;
-    const move = (ev) => setDockH(Math.max(120, Math.min(520, Math.round(h0 - (ev.clientY - sy)))));
-    const up = () => { document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); document.body.style.cursor = ''; document.body.style.userSelect = ''; };
-    document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
-    document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none';
-  };
   const animAddFrame = React.useCallback(() => {
     const t = activeAnimRef.current; if (!t) return;
     const n = nodesRef.current.find(x => x.id === t.nodeId);
@@ -986,8 +1026,53 @@ function LatticeApp() {
     ? { ...tr, keys: tr.keys.map((k, j) => j === ki ? { ...k, ...patch } : k) } : tr)), [setNodes]);
   const animDeleteKey = React.useCallback((ti, ki) => mutTracks(trs => trs.map((tr, i) => i === ti
     ? { ...tr, keys: tr.keys.filter((_, j) => j !== ki) } : tr).filter(tr => (tr.keys || []).length)), [setNodes]);
+  // One undo checkpoint for direct timeline gestures (dragging a keyframe, scrubbing a key value) that
+  // stream through animUpdateKey without recording history. The timeline calls this ONCE at the start of
+  // the gesture, before the first mutation, so pushHistory snapshots the pre-gesture pose → undo works.
+  const animKeyCheckpoint = React.useCallback(() => pushHistory(), [pushHistory]);
+  // Coalesced variant for streamed key edits (e.g. scrubbing several keyframes' time at once): repeated
+  // calls with the same key inside the idle window collapse into a single undo step.
+  const animKeyCoalesce = React.useCallback((key) => coalesceHistory(key), [coalesceHistory]);
+  // Batch key ops for multi-select (marquee delete, copy/cut/paste/duplicate). Every {ti,ki}/{ti,t,…}
+  // in the list is resolved against the SAME pre-mutation track indices in one pass, so nothing shifts
+  // mid-batch. Coalesced into one undo step (component keyframes live on customStates, in the snapshot).
+  const animAddKeys = React.useCallback((adds) => {
+    if (!adds || !adds.length) return;
+    coalesceHistory('kf');
+    const byT = {}; adds.forEach(a => (byT[a.ti] = byT[a.ti] || []).push(a));
+    mutTracks(trs => trs.map((tr, i) => byT[i]
+      ? { ...tr, keys: [...tr.keys.filter(k => !byT[i].some(a => a.t === k.t)), ...byT[i].map(a => ({ t: a.t, value: a.value, ease: a.ease || 'ease-out' }))] }
+      : tr));
+  }, [coalesceHistory, setNodes]); // eslint-disable-line
+  const animDeleteKeys = React.useCallback((dels) => {
+    if (!dels || !dels.length) return;
+    coalesceHistory('kf');
+    const byT = {}; dels.forEach(d => (byT[d.ti] = byT[d.ti] || new Set()).add(d.ki));
+    mutTracks(trs => trs.map((tr, i) => byT[i] ? { ...tr, keys: tr.keys.filter((_, j) => !byT[i].has(j)) } : tr).filter(tr => (tr.keys || []).length));
+  }, [coalesceHistory, setNodes]); // eslint-disable-line
   const animSetDuration = React.useCallback((ms) => { const t = activeAnimRef.current; if (!t) return; setNodes(ns => ns.map(n => n.id === t.nodeId ? { ...n, customStates: (n.customStates || []).map(c => c.id === t.stateId ? { ...c, duration: ms } : c) } : n)); }, [setNodes]);
   const animSetLoopState = React.useCallback((on) => { const t = activeAnimRef.current; if (!t) return; setNodes(ns => ns.map(n => n.id === t.nodeId ? { ...n, customStates: (n.customStates || []).map(c => c.id === t.stateId ? { ...c, loop: on } : c) } : n)); }, [setNodes]);
+  const animSetLoopWrap = React.useCallback((on) => { const t = activeAnimRef.current; if (!t) return; setNodes(ns => ns.map(n => n.id === t.nodeId ? { ...n, customStates: (n.customStates || []).map(c => c.id === t.stateId ? { ...c, loopWrap: on } : c) } : n)); }, [setNodes]);
+  // Loop presets (AnimPresets.jsx): the timeline authors a motion onto ONE selected track, then hands
+  // back the finished keyframes here. We replace that track's keys and apply the loop settings the
+  // dialog chose (duration + loop). Snapshotted as a single undo step.
+  const animApplyPresetToTrack = React.useCallback((ti, keys, opts) => {
+    const t = activeAnimRef.current; if (!t || !Array.isArray(keys)) return;
+    pushHistory();
+    setNodes(ns => ns.map(n => {
+      if (n.id !== t.nodeId) return n;
+      return { ...n, customStates: (n.customStates || []).map(c => {
+        if (c.id !== t.stateId) return c;
+        const base = window.ensureTracks ? window.ensureTracks(c) : c;
+        const tracks = (base.tracks || []).map((tr, i) => i === ti ? { ...tr, keys } : tr);
+        const patch = {};
+        if (opts && opts.duration) patch.duration = Math.max(50, Math.round(opts.duration));
+        if (opts && opts.loop != null) patch.loop = opts.loop;
+        if (opts && opts.loopWrap != null) patch.loopWrap = opts.loopWrap;
+        return { ...base, tracks, frames: [], ...patch };
+      }) };
+    }));
+  }, [setNodes, pushHistory]);
 
   // --- Page scene timeline: a whole-screen animation whose tracks each target one node's property. --
   const SCENE_DEFAULT = { on: true, loop: true, autoplay: true, duration: 2000, tracks: [] };
@@ -998,9 +1083,55 @@ function LatticeApp() {
   const sceneAddKey = (ti, t, value) => mutTimeline(tl => ({ ...tl, tracks: tl.tracks.map((tr, i) => i === ti ? { ...tr, keys: [...tr.keys.filter(k => k.t !== t), { t, value, ease: 'ease-out' }] } : tr) }));
   const sceneUpdateKey = (ti, ki, patch) => mutTimeline(tl => ({ ...tl, tracks: tl.tracks.map((tr, i) => i === ti ? { ...tr, keys: tr.keys.map((k, j) => j === ki ? { ...k, ...patch } : k) } : tr) }));
   const sceneDeleteKey = (ti, ki) => mutTimeline(tl => ({ ...tl, tracks: tl.tracks.map((tr, i) => i === ti ? { ...tr, keys: tr.keys.filter((_, j) => j !== ki) } : tr).filter(tr => (tr.keys || []).length) }));
+  // Batch variants for multi-select (see animAddKeys/animDeleteKeys). Scene keyframes stay outside undo.
+  const sceneAddKeys = (adds) => {
+    if (!adds || !adds.length) return;
+    const byT = {}; adds.forEach(a => (byT[a.ti] = byT[a.ti] || []).push(a));
+    mutTimeline(tl => ({ ...tl, tracks: tl.tracks.map((tr, i) => byT[i]
+      ? { ...tr, keys: [...tr.keys.filter(k => !byT[i].some(a => a.t === k.t)), ...byT[i].map(a => ({ t: a.t, value: a.value, ease: a.ease || 'ease-out' }))] }
+      : tr) }));
+  };
+  const sceneDeleteKeys = (dels) => {
+    if (!dels || !dels.length) return;
+    const byT = {}; dels.forEach(d => (byT[d.ti] = byT[d.ti] || new Set()).add(d.ki));
+    mutTimeline(tl => ({ ...tl, tracks: tl.tracks.map((tr, i) => byT[i] ? { ...tr, keys: tr.keys.filter((_, j) => !byT[i].has(j)) } : tr).filter(tr => (tr.keys || []).length) }));
+  };
   const sceneSetDuration = (ms) => mutTimeline(tl => ({ ...tl, duration: ms }));
   const sceneSetLoop = (on) => mutTimeline(tl => ({ ...tl, loop: on }));
+  const sceneSetLoopWrap = (on) => mutTimeline(tl => ({ ...tl, loopWrap: on }));
   const openSceneTimeline = () => { setSceneOpen(s => !s); setActiveAnimId(null); setView('design'); };
+
+  // --- Inspector ⇄ timeline bridge -----------------------------------------------------------------
+  // From an Inspector field's key button: record `value` for `prop` as a keyframe at the live playhead.
+  // Creates the track if the property isn't animated yet. Routes to the active component-animation tab,
+  // or to the page scene timeline (keyed against the selected node), whichever is open.
+  const keyframeProp = (prop, value) => {
+    const t = Math.max(0, Math.round(timelinePlayheadRef.current || 0));
+    const upsert = (keys) => [...keys.filter(k => k.t !== t), { t, value, ease: 'ease-out' }];
+    if (animValid) {
+      // Component keyframes live on the node's customStates → captured by the undo snapshot. Coalesce so
+      // a "KEY ALL" burst (many props in one tick) is a single undo. (Scene keyframes live on the page
+      // timeline, which the snapshot doesn't carry, so those stay outside undo — as the rest of the
+      // scene dope-sheet already is.)
+      coalesceHistory('kf');
+      mutTracks(trs => {
+        const ti = trs.findIndex(tr => tr.prop === prop);
+        return ti < 0 ? [...trs, { prop, keys: [{ t, value, ease: 'ease-out' }] }]
+                      : trs.map((tr, i) => i === ti ? { ...tr, keys: upsert(tr.keys) } : tr);
+      });
+    } else if (showScene && selectedId) {
+      mutTimeline(tl => {
+        const ti = tl.tracks.findIndex(tr => tr.prop === prop && tr.nodeId === selectedId);
+        return ti < 0 ? { ...tl, tracks: [...tl.tracks, { nodeId: selectedId, prop, keys: [{ t, value, ease: 'ease-out' }] }] }
+                      : { ...tl, tracks: tl.tracks.map((tr, i) => i === ti ? { ...tr, keys: upsert(tr.keys) } : tr) };
+      });
+    }
+  };
+  // Is a timeline open (so key buttons show), and which props are already animated for the shown node?
+  const animActive = animValid || showScene;
+  const animTrackedProps = animValid
+    ? ((animState && animState.tracks) || []).map(tr => tr.prop)
+    : (showScene ? (((page && page.timeline) || {}).tracks || []).filter(tr => tr.nodeId === selectedId).map(tr => tr.prop) : []);
 
   // Canvas signals move/resize start → capture the RAW pre-drag state (base + bp) for undo.
   const onInteractStart = React.useCallback(() => {
@@ -1051,8 +1182,8 @@ function LatticeApp() {
     fireToast({ tone: 'success', title: 'Connected', message: kind });
   }, [pushHistory, setConnections]);
 
-  const selectOne = React.useCallback((id) => { setSelectedIds(id ? [id] : []); setEditingState('default'); setEditingFrame(null); setActiveAnimId(null); }, []);
-  const selectMany = React.useCallback((ids) => { setSelectedIds(ids); setEditingState('default'); setEditingFrame(null); setActiveAnimId(null); }, []);
+  const selectOne = React.useCallback((id) => { breakEditHistory(); setSelectedIds(id ? [id] : []); setEditingState('default'); setEditingFrame(null); setActiveAnimId(null); }, [breakEditHistory]);
+  const selectMany = React.useCallback((ids) => { breakEditHistory(); setSelectedIds(ids); setEditingState('default'); setEditingFrame(null); setActiveAnimId(null); }, [breakEditHistory]);
   const setEditingStateReset = React.useCallback((s) => { setEditingState(s); setEditingFrame(null); }, []);
 
   const deleteNode = React.useCallback((id) => {
@@ -1212,6 +1343,81 @@ function LatticeApp() {
     });
   }, [pushHistory, writeGeom]);
 
+  // Even out the *gap* between the selected nodes so every adjacent pair sits the same distance apart —
+  // like a flexbox `gap`. Unlike distribute (which evens the centres, so gaps still vary with size), this
+  // packs them edge-to-edge along one axis with a single consistent gap. The first node stays put and the
+  // gap used is the AVERAGE of the gaps they already have, so it tidies the existing layout rather than
+  // imposing an arbitrary number. axis: 'v' (column), 'h' (row), or 'auto' (pick the layout's run direction).
+  const gapNodes = React.useCallback((ids, axis = 'auto') => {
+    if (!ids || ids.length < 2) return;
+    const dev = geomDeviceRef.current;
+    const items = ids.map(id => { const n = nodesRef.current.find(x => x.id === id); return n ? { id, n, ...geomAt(n, dev) } : null; }).filter(Boolean);
+    if (items.length < 2) return;
+    // Auto: whichever axis the node centres spread across further is the run direction (tall stack → column).
+    let ax = axis;
+    if (ax === 'auto') {
+      const cx = items.map(a => a.x + a.w / 2), cy = items.map(a => a.y + a.h / 2);
+      const spreadX = Math.max(...cx) - Math.min(...cx), spreadY = Math.max(...cy) - Math.min(...cy);
+      ax = spreadY >= spreadX ? 'v' : 'h';
+    }
+    const key = ax === 'v' ? 'y' : 'x', size = ax === 'v' ? 'h' : 'w';
+    const arr = items.slice().sort((a, b) => a[key] - b[key]);
+    // Consistent gap = mean of the current edge-to-edge gaps, clamped ≥ 0 so nothing ends up overlapping.
+    let sum = 0;
+    for (let i = 1; i < arr.length; i++) sum += arr[i][key] - (arr[i - 1][key] + arr[i - 1][size]);
+    const gap = Math.max(0, Math.round(sum / (arr.length - 1)));
+    pushHistory();
+    let cursor = arr[0][key] + arr[0][size] + gap;   // first node holds its position; pack the rest after it
+    for (let i = 1; i < arr.length; i++) {
+      const a = arr[i];
+      if (a.n.locked) { cursor = a[key] + a[size] + gap; continue; } // a locked node anchors where it is
+      writeGeom(a.id, { [key]: Math.round(cursor) });
+      cursor += a[size] + gap;
+    }
+  }, [pushHistory, writeGeom]);
+
+  // Turn the current selection into a single-active menu ("nav group"): clicking one item in Preview
+  // highlights it and clears the others — the piece the interaction states alone can't do. It reuses
+  // the existing engine: the active look is each item's Left click state, the hover look its Hover On
+  // state, so both stay fully editable in the Inspector (assign a custom animation there too). `style`
+  // seeds the look — container items (frame/card/…) get a filled pill; icon/text items get a
+  // colour + scale pop, since a raw icon paints no background.
+  const setupMenu = React.useCallback((ids, style = 'sidebar') => {
+    const BOX = new Set(['frame', 'stack', 'grid', 'card', 'section']);
+    const items = ((ids && ids.length ? ids : selectedIdsRef.current) || [])
+      .map(id => nodesRef.current.find(n => n.id === id)).filter(Boolean);
+    if (items.length < 2) { fireToast({ tone: 'warning', title: 'Pick the menu items first', message: 'Select 2 or more components, then run this again.' }); return; }
+    // Active glyph/pill colour = the menu's background (nearest ancestor with a fill), so a white pill
+    // gets a legible icon (and a filled pill gets white text).
+    const parentOf = {}; connectionsRef.current.filter(c => c.kind === 'child').forEach(c => { parentOf[c.to] = c.from; });
+    let cur = parentOf[items[0].id], guard = 0, ink = null;
+    while (cur && guard++ < 12) { const p = nodesRef.current.find(n => n.id === cur); if (p && p.fillColor) { ink = p.fillColor; break; } cur = parentOf[cur]; }
+    ink = ink || '#3b2f96';
+    const active = (n) => {
+      const box = BOX.has(n.kind);
+      if (style === 'pills') return box ? { fillColor: ink, textColor: '#ffffff', radius: 999 } : { textColor: '#ffffff', scale: 112 };
+      if (style === 'tabs')  return box ? { borderColor: '#ffffff', borderWidth: 2, textColor: '#ffffff' } : { textColor: '#ffffff', scale: 106 };
+      return box ? { fillColor: '#ffffff', textColor: ink, radius: 14 } : { textColor: '#ffffff', scale: 108 }; // sidebar
+    };
+    const hover = (n) => (BOX.has(n.kind) && style === 'sidebar') ? { fillColor: 'rgba(255,255,255,0.14)', radius: 14 } : { scale: 104 };
+    const gid = uid('menu');
+    const firstId = items.slice().sort((a, b) => a.y - b.y)[0].id;
+    const idSet = new Set(items.map(n => n.id));
+    pushHistory();
+    setNodes(ns => ns.map(n => {
+      if (!idSet.has(n.id)) return n;
+      return {
+        ...n, navGroup: gid, navActive: n.id === firstId, clickMode: 'toggle',
+        states: {
+          ...(n.states || {}),
+          click:   { ...(n.states && n.states.click),   ...active(n), dur: 150, ease: 'ease-out' },
+          hoverOn: { ...(n.states && n.states.hoverOn), ...hover(n),  dur: 120, ease: 'ease-out' },
+        },
+      };
+    }));
+    fireToast({ tone: 'success', title: 'Menu ready', message: items.length + ' items linked · open Preview and click one.' });
+  }, [pushHistory, setNodes]);
+
   // Reorder / reparent from the layers tree. mode: 'before' | 'after' | 'inside'
   const reorderLayer = React.useCallback((dragId, targetId, mode) => {
     if (dragId === targetId) return;
@@ -1236,6 +1442,36 @@ function LatticeApp() {
         return arr;
       });
     }
+  }, [pushHistory, setNodes, setConnections]);
+
+  // Drag-reparent/reorder for a MULTI-selection (Layers panel): move every dragged node to the target,
+  // preserving their top-to-bottom order and keeping them grouped together. Without this, dropping a
+  // multi-selection only moved the one row the user physically grabbed (see LayersTree.onRowDrop).
+  const reorderLayers = React.useCallback((dragIds, targetId, mode) => {
+    const order = nodesRef.current.map(n => n.id);
+    let ids = Array.from(new Set(dragIds)).filter(id => id !== targetId && nodesRef.current.some(n => n.id === id));
+    // Drop any node whose own subtree contains the target — moving it under the target would loop.
+    const looped = ids.filter(id => descendantsOf(id, connectionsRef.current).has(targetId));
+    ids = ids.filter(id => !looped.includes(id));
+    const targetParent = connectionsRef.current.find(c => c.to === targetId && c.kind === 'child')?.from || null;
+    const newParent = mode === 'inside' ? targetId : targetParent;
+    ids = ids.filter(id => id !== newParent);                        // a node can't become its own parent
+    ids.sort((a, b) => order.indexOf(a) - order.indexOf(b));          // keep their relative order
+    if (!ids.length) { if (looped.length) fireToast({ tone: 'warning', title: 'Cannot move', message: 'That would create a loop.' }); return; }
+    pushHistory();
+    const idSet = new Set(ids);
+    setConnections(cs => {
+      const filtered = cs.filter(c => !(idSet.has(c.to) && c.kind === 'child'));
+      return newParent ? [...filtered, ...ids.map(id => ({ from: newParent, to: id, kind: 'child' }))] : filtered;
+    });
+    setNodes(ns => {
+      const moving = ids.map(id => ns.find(n => n.id === id)).filter(Boolean);
+      const arr = ns.filter(n => !idSet.has(n.id));
+      const ti = arr.findIndex(n => n.id === targetId);
+      if (ti < 0) return ns;
+      arr.splice(mode === 'before' ? ti : ti + 1, 0, ...moving);      // 'inside'/'after' land just below the target
+      return arr;
+    });
   }, [pushHistory, setNodes, setConnections]);
 
   // Group the selected layers into a new "folder" (a frame that becomes their parent). Children
@@ -1379,6 +1615,8 @@ function LatticeApp() {
 
   // Fixed dispatcher — maps a declarative action to an existing editor op (no code execution).
   const runCommand = React.useCallback((cmd) => {
+    // Editor commands carry a `run` closure and act globally (no selection needed), Blender-style.
+    if (cmd.run) { setCmdOpen(false); cmd.run(); return; }
     const ids = selectedIdsRef.current;
     if (!ids || !ids.length) { fireToast({ tone: 'warning', title: 'Select a component first' }); return; }
     const p = cmd.params || {};
@@ -1446,13 +1684,78 @@ function LatticeApp() {
     fireToast({ tone: 'success', title: 'Code generated', message: nodes.length + ' nodes → React + TypeScript.' });
   };
 
-  // Launch a live, chromeless run of the prototype in a new tab (interactions + workflows execute).
-  const runApp = () => {
-    const u = new URL(window.location.href);
-    u.searchParams.set('run', '1');
-    window.open(u.toString(), '_blank', 'noopener');
+  // ---- Run system: compile the generated source and launch it in real popup window(s) ----
+  // Release = one webpage window. Debug = webpage + a console window (logs, network, build errors). The
+  // run executes the SAME files the export ships (RunEngine + CodePanel.latticeProjectFileMap), so a
+  // clean run means a clean export. Every start re-inits (recompiles) — the loading is expected.
+  // The run opens showing exactly the device/screen-type the editor is on (its own toolbar then lets
+  // you switch); non-responsive projects run desktop-only. `standalone` drops the toolbar entirely and
+  // renders just the page as a real, window-following web app.
+  const runConfig = (opts) => {
+    const standalone = !!(opts && opts.standalone);
+    return {
+      // Standalone follows the window from the first paint, so it starts device-less (auto by width);
+      // the toolbar view opens on exactly the device/screen-type the editor is showing.
+      device: standalone ? '' : activeDevice,
+      preset: settings.desktopPreset || 'std',
+      orientation: standalone ? '' : (orient[orientKeyFor(activeDevice, settings.desktopPreset)] || ''),
+      responsive: settings.responsive !== false,
+      chrome: !standalone,
+      workflows, variables,
+    };
   };
-  // In a run tab, start in preview mode so inputs/workflows are live (also seeds the runtime vars).
+  const runFileMap = (opts) => (window.latticeProjectFileMap ? window.latticeProjectFileMap(pages, projectName || 'Lattice app', assets, runConfig(opts)) : {});
+  const conLog = (entry) => { const cw = conWinRef.current; if (cw && !cw.closed && cw.__latticeLog) { try { cw.__latticeLog(entry); } catch (e) { /* window closed */ } } };
+  const stopRun = () => {
+    clearInterval(runPollRef.current); runPollRef.current = null;
+    try { if (runWinRef.current && !runWinRef.current.closed) runWinRef.current.close(); } catch (e) { /* gone */ }
+    try { if (conWinRef.current && !conWinRef.current.closed) conWinRef.current.close(); } catch (e) { /* gone */ }
+    runWinRef.current = null; conWinRef.current = null;
+    setRunState({ active: false, paused: false, debug: false, standalone: false });
+  };
+  const startRun = (debug, opts) => {
+    if (!window.buildRunnableHtml) { fireToast({ tone: 'danger', title: 'Run engine unavailable' }); return; }
+    const standalone = !!(opts && opts.standalone);
+    const fileMap = runFileMap({ standalone });
+    const html = window.buildRunnableHtml(fileMap, { title: projectName || 'Lattice app', debug: !!debug, channel: 'run' });
+    let win = runWinRef.current;
+    if (!win || win.closed) win = window.open('', 'lattice_run', 'width=1200,height=840');
+    if (!win) { fireToast({ tone: 'danger', title: 'Popup blocked', message: 'Allow pop-ups for this site, then Run again.' }); return; }
+    win.document.open(); win.document.write(html); win.document.close();
+    try { win.focus(); } catch (e) { /* ignore */ }
+    runWinRef.current = win;
+    if (debug) {
+      let cw = conWinRef.current;
+      if (!cw || cw.closed) cw = window.open('', 'lattice_console', 'width=560,height=840');
+      if (cw) { cw.document.open(); cw.document.write(window.buildConsoleHtml((projectName || 'App') + ' — Console')); cw.document.close(); conWinRef.current = cw; }
+      conLog({ tag: 'build', cls: 'build', text: 'Run started — compiling ' + Object.keys(fileMap).length + ' files…' });
+    } else if (conWinRef.current && !conWinRef.current.closed) { conWinRef.current.close(); conWinRef.current = null; }
+    setRunState({ active: true, paused: false, debug: !!debug, standalone });
+    clearInterval(runPollRef.current);
+    runPollRef.current = setInterval(() => { const w = runWinRef.current; if (!w || w.closed) stopRun(); }, 800);
+  };
+  const restartRun = () => startRun(runState.debug, { standalone: runState.standalone });
+  const pauseRun = () => {
+    const w = runWinRef.current; if (!w || w.closed) return;
+    const next = !runState.paused;
+    try { w.postMessage({ __latticeCtl: true, cmd: next ? 'pause' : 'resume' }, '*'); } catch (e) { /* ignore */ }
+    setRunState(r => ({ ...r, paused: next }));
+    conLog({ tag: 'build', cls: 'build', text: next ? 'Paused.' : 'Resumed.' });
+  };
+  // The editor is the message hub: the run window posts console/network/status here (its opener), and we
+  // mirror those into the debug console window.
+  React.useEffect(() => {
+    const onMsg = (e) => {
+      const d = e.data; if (!d || !d.__lattice) return;
+      const p = d.payload || {};
+      if (d.kind === 'console') conLog({ tag: p.level, cls: p.level, text: p.text, t: d.t });
+      else if (d.kind === 'net') conLog({ tag: 'net', cls: 'net', text: (p.method || 'GET') + ' ' + p.url + (p.status != null ? ('  ' + p.status + ' (' + p.ms + 'ms)') : (p.phase === 'error' ? ('  failed: ' + p.error) : '  …')), t: d.t });
+      else if (d.kind === 'status') { if (p.state === 'running') conLog({ tag: 'build', cls: 'build', text: 'App running.' }); else if (p.state === 'error') conLog({ tag: 'error', cls: 'error', text: 'App failed to start (see errors above).' }); }
+    };
+    window.addEventListener('message', onMsg);
+    return () => window.removeEventListener('message', onMsg);
+  }, []); // eslint-disable-line
+  // In a legacy ?run=1 tab, start in preview mode so inputs/workflows are live.
   React.useEffect(() => { if (runFlag) setPreviewMode(true); }, []); // eslint-disable-line
 
   const copyLink = () => {
@@ -1484,11 +1787,32 @@ function LatticeApp() {
     selectAll: () => setSelectedIds(nodesRef.current.map(n => n.id)), reset: resetActivePage,
   };
 
-  // Persist project + settings (standalone editor only; project canvases live in the DB)
+  // Persist project + settings (standalone editor only; project canvases live in the DB). Heavy `assets`
+  // (base64 images/fonts + scaffold files) are stored separately in IndexedDB — bundling them into this
+  // localStorage key blew its ~5MB quota, and the swallowed failure lost the whole project on reload.
   React.useEffect(() => {
     if (projectId) return;
-    try { localStorage.setItem('lattice_project_v2', JSON.stringify({ project: { pages, activePageId, workflows, variables, customComponents, customShaders, enabledLibrary, assets }, settings })); } catch {}
-  }, [pages, activePageId, workflows, variables, customComponents, customShaders, enabledLibrary, assets, settings, projectId]);
+    try { localStorage.setItem('lattice_project_v2', JSON.stringify({ project: { pages, activePageId, workflows, variables, customComponents, customShaders, enabledLibrary }, settings })); } catch {}
+  }, [pages, activePageId, workflows, variables, customComponents, customShaders, enabledLibrary, settings, projectId]);
+  // Boot: hydrate the heavy assets from IndexedDB (localStorage now carries only the light project). A
+  // legacy save may have embedded assets in localStorage — those are already in state, so keep them and
+  // let the persist effect below migrate them into IndexedDB. `assetsLoaded` gates persistence until this
+  // read finishes, so the empty initial state can't overwrite what's saved before we've read it back.
+  const [assetsLoaded, setAssetsLoaded] = React.useState(false);
+  React.useEffect(() => {
+    if (projectId) { setAssetsLoaded(true); return; }
+    let cancelled = false;
+    idbGet(IDB_ASSETS_KEY).then(saved => {
+      if (cancelled) return;
+      if (Array.isArray(saved) && saved.length) setAssets(cur => (cur && cur.length ? cur : saved));
+      setAssetsLoaded(true);
+    });
+    return () => { cancelled = true; };
+  }, [projectId]);
+  React.useEffect(() => {
+    if (projectId || !assetsLoaded) return;   // wait for the initial read before writing anything back
+    idbSet(IDB_ASSETS_KEY, assets).then(ok => { if (ok === false) console.warn('[lattice] could not persist assets (IndexedDB unavailable)'); });
+  }, [assets, assetsLoaded, projectId]);
 
   // Export / import the whole project as JSON (an editor tool)
   const exportProject = () => {
@@ -1670,6 +1994,14 @@ function LatticeApp() {
 
   // The design canvas — rendered either on its own, or above the timeline dock when one is open (so the
   // whole page stays visible while animating). Defined once; only one instance mounts at a time.
+  // When a timeline is docked at the bottom, the visible canvas is only the region above it. Center the
+  // left/right panel-collapse tabs in *that* region (not the whole column) so a tall timeline never
+  // overlaps them — they ride up as the dock grows. 33px = page-tab bar, 7px = timeline resize handle.
+  const timelineDocked = view === 'design' && (animValid || showScene);
+  const sideTabTop = timelineDocked
+    ? `calc(33px + ((100% - 33px) * ${1 - timelineFrac} - 7px) / 2)`
+    : '50%';
+
   const designCanvas = (
     <Canvas
       nodes={canvasNodes} connections={connections} settings={settings}
@@ -1677,9 +2009,56 @@ function LatticeApp() {
       selectedIds={selectedIds} onSelect={selectOne} onSelectMany={selectMany}
       onUpdateNode={updateNode} onCommitDrag={commitDrag} onInteractStart={onInteractStart}
       onDropComponent={dropComponent} onAddConnection={addConnection}
+      editingState={editingState}
+      editingStateLabel={editingState === 'default' ? '' : (((window.STATE_LABELS || {})[editingState]) || ((selected && (selected.customStates || []).find(c => c.id === editingState) || {}).name) || 'state')}
       onAlign={alignNodes} onDistribute={distributeNodes} viewRef={canvasViewRef} actions={actions}
     />
   );
+
+  // ⌘/Ctrl-K command menu: every top-level editor action, searchable Blender-style. `run` closures act
+  // globally (no selection needed for view/panel/page ops); selection-scoped ones no-op with nothing selected.
+  const cmdSel = () => selectedIdsRef.current || [];
+  const editorCommands = [
+    { id: 'go-design', group: 'Go to', label: 'Design view', run: () => setView('design') },
+    { id: 'go-code', group: 'Go to', label: 'Code view', run: () => setView('code') },
+    { id: 'go-rel', group: 'Go to', label: 'Relationships view', run: () => setView('relationships') },
+    { id: 'go-flow', group: 'Go to', label: 'Workflow view', run: () => setView('workflow') },
+    { id: 'toggle-preview', group: 'View', label: 'Toggle preview', run: () => setPreviewMode(v => !v) },
+    { id: 'run-app', group: 'View', label: 'Run app', run: () => startRun(false) },
+    { id: 'debug-app', group: 'View', label: 'Debug app (with console)', run: () => startRun(true) },
+    { id: 'scene-tl', group: 'Animate', label: 'Toggle scene timeline', run: () => openSceneTimeline() },
+    { id: 'undo', group: 'Edit', label: 'Undo', shortcut: 'Ctrl+Z', run: () => undo() },
+    { id: 'redo', group: 'Edit', label: 'Redo', shortcut: 'Ctrl+Y', run: () => redo() },
+    { id: 'copy', group: 'Edit', label: 'Copy selection', shortcut: 'Ctrl+C', run: () => copySelection() },
+    { id: 'paste', group: 'Edit', label: 'Paste', shortcut: 'Ctrl+V', run: () => paste() },
+    { id: 'duplicate', group: 'Edit', label: 'Duplicate selection', shortcut: 'Ctrl+D', run: () => { const s = cmdSel(); if (s.length) duplicateNodes(s); } },
+    { id: 'delete', group: 'Edit', label: 'Delete selection', shortcut: 'Del', run: () => { const s = cmdSel(); if (s.length) deleteMany(s); } },
+    { id: 'select-all', group: 'Edit', label: 'Select all', shortcut: 'Ctrl+A', run: () => setSelectedIds(nodesRef.current.map(n => n.id)) },
+    { id: 'deselect', group: 'Edit', label: 'Deselect all', shortcut: 'Esc', run: () => setSelectedIds([]) },
+    { id: 'group', group: 'Arrange', label: 'Group selection', shortcut: 'Ctrl+G', run: () => { const s = cmdSel(); if (s.length > 1) groupNodes(s); } },
+    { id: 'align-left', group: 'Align', label: 'Align left', run: () => { const s = cmdSel(); if (s.length) alignNodes(s, 'left'); } },
+    { id: 'align-hcenter', group: 'Align', label: 'Align center (horizontal)', run: () => { const s = cmdSel(); if (s.length) alignNodes(s, 'hcenter'); } },
+    { id: 'align-right', group: 'Align', label: 'Align right', run: () => { const s = cmdSel(); if (s.length) alignNodes(s, 'right'); } },
+    { id: 'align-top', group: 'Align', label: 'Align top', run: () => { const s = cmdSel(); if (s.length) alignNodes(s, 'top'); } },
+    { id: 'align-vmiddle', group: 'Align', label: 'Align middle (vertical)', run: () => { const s = cmdSel(); if (s.length) alignNodes(s, 'vmiddle'); } },
+    { id: 'align-bottom', group: 'Align', label: 'Align bottom', run: () => { const s = cmdSel(); if (s.length) alignNodes(s, 'bottom'); } },
+    { id: 'dist-h', group: 'Align', label: 'Distribute horizontally', run: () => { const s = cmdSel(); if (s.length > 2) distributeNodes(s, 'h'); } },
+    { id: 'dist-v', group: 'Align', label: 'Distribute vertically', run: () => { const s = cmdSel(); if (s.length > 2) distributeNodes(s, 'v'); } },
+    { id: 'gap-auto', group: 'Align', label: 'Gap: even out spacing (auto)', run: () => { const s = cmdSel(); if (s.length > 1) gapNodes(s, 'auto'); } },
+    { id: 'gap-v', group: 'Align', label: 'Gap: even vertical spacing (column)', run: () => { const s = cmdSel(); if (s.length > 1) gapNodes(s, 'v'); } },
+    { id: 'gap-h', group: 'Align', label: 'Gap: even horizontal spacing (row)', run: () => { const s = cmdSel(); if (s.length > 1) gapNodes(s, 'h'); } },
+    { id: 'menu-sidebar', group: 'Menu', label: 'Menu: make sidebar menu (single-active pill)', run: () => { const s = cmdSel(); s.length > 1 ? setupMenu(s, 'sidebar') : fireToast({ tone: 'warning', title: 'Select the menu items first' }); } },
+    { id: 'menu-pills', group: 'Menu', label: 'Menu: make pill menu (single-active)', run: () => { const s = cmdSel(); s.length > 1 ? setupMenu(s, 'pills') : fireToast({ tone: 'warning', title: 'Select the menu items first' }); } },
+    { id: 'menu-tabs', group: 'Menu', label: 'Menu: make tab menu (single-active)', run: () => { const s = cmdSel(); s.length > 1 ? setupMenu(s, 'tabs') : fireToast({ tone: 'warning', title: 'Select the menu items first' }); } },
+    { id: 'new-page', group: 'Pages', label: 'New page', run: () => addPage() },
+    { id: 'toggle-left', group: 'Panels', label: 'Toggle left panel', run: () => setCollapsed(c => ({ ...c, left: !c.left })) },
+    { id: 'toggle-right', group: 'Panels', label: 'Toggle right panel', run: () => setCollapsed(c => ({ ...c, right: !c.right })) },
+    { id: 'open-settings', group: 'App', label: 'Open settings', run: () => setSettingsOpen(true) },
+    { id: 'share', group: 'App', label: 'Share project', run: () => setShareOpen(true) },
+    { id: 'generate', group: 'App', label: 'Generate code', run: () => generate() },
+    { id: 'shortcuts', group: 'App', label: 'Keyboard shortcuts', run: () => setHelpOpen(true) },
+  ];
+  const paletteCommands = [...editorCommands, ...commands];
 
   return (
     <div style={{ position: 'fixed', inset: 0, display: 'flex', flexDirection: 'column', background: 'var(--bg-app)' }}>
@@ -1689,7 +2068,8 @@ function LatticeApp() {
         projectName={projectName} saving={saving}
         onBack={projectId ? () => { window.location.href = '/ui_kits/lattice-app/#/projects'; } : null}
         onHelp={() => setHelpOpen(true)}
-        previewMode={previewMode} onTogglePreview={() => setPreviewMode(v => !v)} onRun={runApp}
+        previewMode={previewMode} onTogglePreview={() => setPreviewMode(v => !v)}
+        onRun={startRun} runState={runState} onStop={stopRun} onRestart={restartRun} onPause={pauseRun}
         device={activeDevice} onSetDevice={setActiveDevice}
         responsive={settings.responsive !== false}
         desktopPreset={settings.desktopPreset} onSetDesktopPreset={setDesktopPreset}
@@ -1719,10 +2099,11 @@ function LatticeApp() {
                   nodes={viewNodes} connections={connections} selectedIds={selectedIds}
                   onSelect={selectOne} onSelectMany={selectMany} onRename={renameNode} onSetParent={setParent}
                   onToggleVisibility={toggleVisibility} onToggleLock={toggleLock}
-                  onReorder={reorderLayer} actions={actions}
+                  onReorder={reorderLayer} onReorderMany={reorderLayers} actions={actions}
                 />
               </div>
             </div>
+            <AccountFooter />
           </aside>
         )}
 
@@ -1731,14 +2112,14 @@ function LatticeApp() {
         <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', position: 'relative' }}>
           {view === 'design' && (
             <PageTabs pages={pages} activePageId={activePageId} onSelectPage={selectPage} onAddPage={addPage} onRenamePage={renamePage} onDeletePage={deletePage}
-              animTabs={animTabList} activeAnimId={activeAnimId} onSelectAnim={selectAnimTab} onCloseAnim={closeAnimTab} onTearTab={startTabTear} />
+              animTabs={animTabList} activeAnimId={activeAnimId} onSelectAnim={selectAnimTab} onCloseAnim={closeAnimTab} />
           )}
           {/* A timeline is docked at the bottom (inside the Design tab only) with the page canvas above,
               so the whole page stays visible while animating. Drag the handle — or use the ⌃/⌄ buttons
               in the transport bar — to resize; the page takes the remaining height. */}
           {view === 'design' && (animValid || showScene) ? (
             <div ref={timelineAreaRef} style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-              <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>{designCanvas}</div>
+              <div style={{ flex: 1, minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'column' }}>{designCanvas}</div>
               <div onMouseDown={startTimelineResize} onDoubleClick={() => setTimelineFrac(0.58)} title="Drag to resize · double-click to reset"
                 onMouseEnter={e => { e.currentTarget.style.background = 'var(--border-strong)'; }}
                 onMouseLeave={e => { e.currentTarget.style.background = 'var(--surface)'; }}
@@ -1749,16 +2130,20 @@ function LatticeApp() {
                     palette={settings.palette || []}
                     onAddTrack={animAddTrack} onDeleteTrack={animDeleteTrack}
                     onAddKey={animAddKey} onUpdateKey={animUpdateKey} onDeleteKey={animDeleteKey}
-                    onSetDuration={animSetDuration} onSetLoop={animSetLoopState}
-                    onSetMode={setTimelineMode} canComponent
+                    onAddKeys={animAddKeys} onDeleteKeys={animDeleteKeys}
+                    onKeyCheckpoint={animKeyCheckpoint} onKeyCoalesce={animKeyCoalesce}
+                    onSetDuration={animSetDuration} onSetLoop={animSetLoopState} onSetLoopWrap={animSetLoopWrap}
+                    onApplyPresetToTrack={animApplyPresetToTrack}
+                    onSetMode={setTimelineMode} canComponent playheadRef={timelinePlayheadRef}
                     onSetHeightMax={maximizeTimeline} onSetHeightMin={minimizeTimeline} />
                 ) : (
                   <TimelineEditor pageMode pageNodes={viewNodes} palette={settings.palette || []}
-                    state={{ name: 'Scene · ' + page.name, tracks: (page.timeline || {}).tracks || [], duration: (page.timeline || {}).duration || 2000, loop: (page.timeline || {}).loop !== false }}
+                    state={{ name: 'Scene · ' + page.name, tracks: (page.timeline || {}).tracks || [], duration: (page.timeline || {}).duration || 2000, loop: (page.timeline || {}).loop !== false, loopWrap: (page.timeline || {}).loopWrap !== false }}
                     onAddTrack={sceneAddTrack} onDeleteTrack={sceneDeleteTrack}
                     onAddKey={sceneAddKey} onUpdateKey={sceneUpdateKey} onDeleteKey={sceneDeleteKey}
-                    onSetDuration={sceneSetDuration} onSetLoop={sceneSetLoop}
-                    onSetMode={setTimelineMode} canComponent={canComponentTimeline} onClose={openSceneTimeline}
+                    onAddKeys={sceneAddKeys} onDeleteKeys={sceneDeleteKeys}
+                    onSetDuration={sceneSetDuration} onSetLoop={sceneSetLoop} onSetLoopWrap={sceneSetLoopWrap}
+                    onSetMode={setTimelineMode} canComponent={canComponentTimeline} onClose={openSceneTimeline} playheadRef={timelinePlayheadRef}
                     onSetHeightMax={maximizeTimeline} onSetHeightMin={minimizeTimeline} />
                 )}
               </div>
@@ -1767,7 +2152,7 @@ function LatticeApp() {
             <>
               {view === 'design' && !previewMode && designCanvas}
               {view === 'design' && previewMode && <PreviewCanvas nodes={viewNodes} connections={connections} artboard={artboard} device={activeDevice} onAction={onPreviewAction} runtime={previewRuntime} runtimeProps={runtimeProps} pageTimeline={page.timeline} animCtl={animCtlRef} sceneReplay={sceneReplay} />}
-              {view === 'code' && <CodePanel pages={pages} activePageId={activePageId} assets={assets} onChangeAssets={setAssets} projectName={projectName} settings={settings} />}
+              {view === 'code' && <CodePanel pages={pages} activePageId={activePageId} assets={assets} onChangeAssets={setAssets} projectName={projectName} settings={settings} workflows={workflows} variables={variables} />}
               {view === 'rel' && (
                 <RelationshipsView nodes={nodes} connections={connections} onSelect={(id) => { selectOne(id); setView('design'); }} />
               )}
@@ -1781,9 +2166,6 @@ function LatticeApp() {
                 />
               )}
             </>
-          )}
-          {view === 'design' && dockTarget && window.PreviewDock && (
-            <window.PreviewDock target={dockTarget} height={dockH} onClose={() => setDock(null)} onResizeStart={startDockResize} />
           )}
           {/* Scene-timeline toggle — floats at the bottom-right of the canvas (mirrors the zoom control
               at bottom-left). Hidden while a timeline editor is open, since those own that corner; the
@@ -1802,9 +2184,9 @@ function LatticeApp() {
         {view === 'design' && !collapsed.right && (
           <Inspector
             width={panelW.right}
-            node={animValid ? animNode : inspectorNode}
-            onChange={animValid ? updateNode : editNode}
-            onBaseChange={updateNode} onRename={renameNode}
+            node={animValid ? mergeState(animNode, activeAnim.stateId) : inspectorNode}
+            onChange={animValid ? inspAnimStateChange : inspChange}
+            onBaseChange={inspBaseChange} onRename={inspRename}
             connections={connections} onDelete={deleteNode} onDetach={detachNode}
             onDuplicate={() => selected && duplicateNodes([selected.id])}
             allNodes={viewNodes} onSetParent={setParent}
@@ -1813,12 +2195,14 @@ function LatticeApp() {
             assets={assets} onAddAsset={addImageAsset}
             workflows={workflows} variables={variables} pageVars={page.vars || []}
             editingState={editingState} onSetEditingState={setEditingStateReset}
+            animActive={animActive} animTrackedProps={animTrackedProps} onKeyframeProp={keyframeProp}
+            animEditing={animValid ? (animState.name || 'Animation') : ''}
             singleSelected={animValid ? true : selectedIds.length === 1}
             frameEditing={false} onOpenAnimEditor={openAnimEditor}
             onApplyPreset={applyPreset} onBindAnim={bindAnim}
             onSaveAsComponent={openSaveAsComponent} onEditShader={openShaderEditor}
             shaderPresets={shaderPresets}
-            onResetState={resetState}
+            onResetState={resetState} onSetStateEnabled={setStateEnabled}
             editingFrame={editingFrame} onSetEditingFrame={setEditingFrame}
             onAddCustomState={addCustomState} onUpdateCustomState={updateCustomState} onDeleteCustomState={deleteCustomState}
             onAddFrame={addFrame} onUpdateFrame={updateFrame} onDeleteFrame={deleteFrame}
@@ -1833,7 +2217,7 @@ function LatticeApp() {
         {view === 'design' && (
           <button type="button" title={collapsed.left ? 'Show left panel' : 'Hide left panel'}
             onClick={() => setCollapsed(c => ({ ...c, left: !c.left }))}
-            style={{ position: 'absolute', top: '50%', transform: 'translateY(-50%)', left: collapsed.left ? 0 : panelW.left - 1, zIndex: 7,
+            style={{ position: 'absolute', top: sideTabTop, transform: 'translateY(-50%)', left: collapsed.left ? 0 : panelW.left - 1, zIndex: 7,
               width: 15, height: 46, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0,
               border: '1px solid var(--border-subtle)', borderRadius: '0 6px 6px 0',
               background: 'var(--surface)', color: 'var(--text-muted)', cursor: 'pointer' }}>
@@ -1843,7 +2227,7 @@ function LatticeApp() {
         {view === 'design' && (
           <button type="button" title={collapsed.right ? 'Show right panel' : 'Hide right panel'}
             onClick={() => setCollapsed(c => ({ ...c, right: !c.right }))}
-            style={{ position: 'absolute', top: '50%', transform: 'translateY(-50%)', right: collapsed.right ? 0 : panelW.right - 1, zIndex: 7,
+            style={{ position: 'absolute', top: sideTabTop, transform: 'translateY(-50%)', right: collapsed.right ? 0 : panelW.right - 1, zIndex: 7,
               width: 15, height: 46, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0,
               border: '1px solid var(--border-subtle)', borderRadius: '6px 0 0 6px',
               background: 'var(--surface)', color: 'var(--text-muted)', cursor: 'pointer' }}>
@@ -1851,19 +2235,6 @@ function LatticeApp() {
           </button>
         )}
       </div>
-
-      {/* Drop zone shown while dragging a tab down — release here to open the bottom preview dock. */}
-      {tearing && (
-        <div style={{ position: 'fixed', left: 0, right: 0, bottom: 0, height: 150, zIndex: 9998, pointerEvents: 'none',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          background: 'linear-gradient(to top, color-mix(in srgb, var(--blue-base) 22%, transparent), transparent)',
-          borderTop: '2px dashed var(--blue-base)' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 16px', background: 'var(--surface-raised)',
-            border: '1px solid var(--blue-base)', borderRadius: 8, color: 'var(--text-primary)', fontSize: 13, fontWeight: 500, boxShadow: 'var(--shadow-overlay)' }}>
-            <span style={{ color: 'var(--blue-base)', fontSize: 16, lineHeight: 1 }}>↧</span> Drop here to open a preview dock
-          </div>
-        </div>
-      )}
 
       <Dialog open={shareOpen} onClose={() => setShareOpen(false)} title="Share project"
         description="Anyone with the link can view this canvas."
@@ -2029,12 +2400,12 @@ function LatticeApp() {
       </Dialog>
 
       <Dialog open={cmdOpen} onClose={() => setCmdOpen(false)} title="Command menu" width={460}
-        description="Run plugin & animation actions on the current selection.">
+        description="Search every editor action — views, edits, alignment, panels, plus plugins & animations.">
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <Input autoFocus iconLeft={<i data-lucide="search"></i>} placeholder="Search commands…" size="sm"
             value={cmdQuery} onChange={e => setCmdQuery(e.target.value)} />
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 300, overflowY: 'auto' }}>
-            {commands.filter(c => (c.label + ' ' + c.group).toLowerCase().includes(cmdQuery.trim().toLowerCase())).map(c => (
+            {paletteCommands.filter(c => (c.label + ' ' + c.group).toLowerCase().includes(cmdQuery.trim().toLowerCase())).map(c => (
               <button key={c.id} type="button" onClick={() => runCommand(c)}
                 style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '9px 10px', border: '1px solid var(--border-subtle)', background: 'var(--surface-card)', color: 'var(--text-primary)', cursor: 'pointer', textAlign: 'left', fontSize: 13 }}
                 onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--border-strong)'; }}
@@ -2043,9 +2414,9 @@ function LatticeApp() {
                 {c.shortcut && <kbd style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)', background: 'var(--surface-inset)', border: '1px solid var(--border-subtle)', padding: '1px 6px' }}>{c.shortcut.toUpperCase()}</kbd>}
               </button>
             ))}
-            {commands.length === 0 && (
+            {paletteCommands.filter(c => (c.label + ' ' + c.group).toLowerCase().includes(cmdQuery.trim().toLowerCase())).length === 0 && (
               <div style={{ fontSize: 12.5, color: 'var(--text-muted)', padding: '10px 2px', lineHeight: 1.5 }}>
-                No plugins or animations enabled. Enable them in <strong style={{ color: 'var(--text-secondary)' }}>Settings → Assets &amp; Plugins</strong>.
+                No command matches “{cmdQuery}”.
               </div>
             )}
           </div>
@@ -2080,4 +2451,39 @@ function LatticeApp() {
     </div>
   );
 }
+// Account footer — the signed-in user's name, email and current plan, pinned to the bottom of the left
+// panel. Reads the app backend (present when the editor is opened from the product with a session);
+// falls back to a neutral "Guest / Free" state when the editor runs standalone with no backend/auth.
+function AccountFooter() {
+  const [user, setUser] = React.useState(null);
+  const [plan, setPlan] = React.useState(null);
+  React.useEffect(() => {
+    let alive = true;
+    fetch('/api/auth/me', { credentials: 'include' })
+      .then(r => (r.ok ? r.json() : null)).then(d => { if (alive && d && d.user) setUser(d.user); }).catch(() => {});
+    fetch('/api/subscription', { credentials: 'include' })
+      .then(r => (r.ok ? r.json() : null)).then(d => { if (alive && d && d.subscription) setPlan(d.subscription.name); }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
+  const name = (user && user.name) || 'Guest';
+  const email = (user && user.email) || 'Not signed in';
+  const planName = plan || 'Free';
+  const initials = (name.match(/\b\w/g) || ['G']).slice(0, 2).join('').toUpperCase();
+  return (
+    <div style={{ flex: 'none', borderTop: '1px solid var(--border-subtle)', background: 'var(--surface)',
+      padding: '10px 12px', display: 'flex', alignItems: 'center', gap: 10 }}>
+      <div title={name} style={{ flex: 'none', width: 30, height: 30, borderRadius: '50%',
+        display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 600,
+        color: 'var(--action-solid-text)', background: 'var(--action-solid)', userSelect: 'none' }}>{initials}</div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</div>
+        <div title={email} style={{ fontSize: 11, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{email}</div>
+      </div>
+      <span title={planName + ' plan'} style={{ flex: 'none', fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em',
+        color: 'var(--action-solid)', background: 'color-mix(in srgb, var(--action-solid) 16%, transparent)',
+        border: '1px solid color-mix(in srgb, var(--action-solid) 40%, transparent)', borderRadius: 999, padding: '2px 8px' }}>{planName}</span>
+    </div>
+  );
+}
+
 window.LatticeApp = LatticeApp;

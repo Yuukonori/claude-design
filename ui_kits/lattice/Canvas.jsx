@@ -33,7 +33,7 @@ const geomContains = (o, n) => n.id !== o.id &&
   n.x + n.w <= o.x + o.w && n.y + n.h <= o.y + o.h &&
   (o.w * o.h) > (n.w * n.h);
 
-function Canvas({ nodes, connections, settings = {}, artboard, device, selectedIds = [], onSelect, onSelectMany, onUpdateNode, onCommitDrag, onInteractStart, onDropComponent, onAddConnection, onAlign, onDistribute, viewRef, actions = {} }) {
+function Canvas({ nodes, connections, settings = {}, artboard, device, selectedIds = [], onSelect, onSelectMany, onUpdateNode, onCommitDrag, onInteractStart, onDropComponent, onAddConnection, onAlign, onDistribute, viewRef, actions = {}, editingState = 'default', editingStateLabel = '' }) {
   const W = 1600, H = 1000;
 
   const viewportRef = React.useRef(null);
@@ -72,6 +72,7 @@ function Canvas({ nodes, connections, settings = {}, artboard, device, selectedI
   const didDragRef = React.useRef(false);
   const spaceRef = React.useRef(false);
   const [spaceHeld, setSpaceHeld] = React.useState(false);
+  const [panning, setPanning] = React.useState(false);
   const [hoveredId, setHoveredId] = React.useState(null);
 
   const marqueeRectRef = React.useRef(null);
@@ -94,10 +95,12 @@ function Canvas({ nodes, connections, settings = {}, artboard, device, selectedI
 
   // --- Interaction starters ---
   const startPan = (e) => {
+    didDragRef.current = false; // a stationary press stays a click (→ deselect); a drag becomes a pan
     dragRef.current = {
       type: 'pan', startMX: e.clientX, startMY: e.clientY,
       origPanX: transformRef.current.x, origPanY: transformRef.current.y,
     };
+    setPanning(true);
     e.preventDefault();
   };
 
@@ -164,10 +167,22 @@ function Canvas({ nodes, connections, settings = {}, artboard, device, selectedI
     e.stopPropagation();
     didDragRef.current = false;
     onInteractStart && onInteractStart();
+    // Resize the whole selection together when the grabbed node is part of a multi-selection;
+    // otherwise just this node. Locked members never resize. We snapshot each member's start
+    // geometry + the selection's bounding box, then scale everything into the new box on move.
+    const selIds = selectedIdsRef.current || [];
+    const ids = (selIds.includes(node.id) && selIds.length > 1)
+      ? selIds.filter(id => { const m = nodesRef.current.find(x => x.id === id); return m && !m.locked; })
+      : [node.id];
+    const geoms = {};
+    ids.forEach(id => { const m = nodesRef.current.find(x => x.id === id); if (m) geoms[id] = { x: m.x, y: m.y, w: m.w, h: m.h }; });
+    const gs = Object.values(geoms);
+    const minX = Math.min(...gs.map(g => g.x)), minY = Math.min(...gs.map(g => g.y));
+    const maxX = Math.max(...gs.map(g => g.x + g.w)), maxY = Math.max(...gs.map(g => g.y + g.h));
     dragRef.current = {
-      type: 'resize', id: node.id, corner, lockAspect: !!node.lockAspect,
+      type: 'resize', id: node.id, ids, geoms, corner, lockAspect: !!node.lockAspect,
       startMX: e.clientX, startMY: e.clientY,
-      origX: node.x, origY: node.y, origW: node.w, origH: node.h,
+      box: { x: minX, y: minY, w: Math.max(1, maxX - minX), h: Math.max(1, maxY - minY) },
       snapshot: JSON.parse(JSON.stringify(nodesRef.current)),
     };
     setDraggingId(node.id);
@@ -249,19 +264,31 @@ function Canvas({ nodes, connections, settings = {}, artboard, device, selectedI
       } else if (d.type === 'resize') {
         const z = transformRef.current.z;
         const dx = rawDx / z, dy = rawDy / z;
-        const { corner, origX, origY, origW, origH } = d;
+        const { corner, box } = d;
         const MIN_W = 60, MIN_H = 36;
-        let x = origX, y = origY, w = origW, h = origH;
-        if (corner.includes('e')) w = Math.max(MIN_W, snap(origW + dx));
-        if (corner.includes('s')) h = Math.max(MIN_H, snap(origH + dy));
-        if (corner.includes('w')) { w = Math.max(MIN_W, snap(origW - dx)); x = origX + origW - w; }
-        if (corner.includes('n')) { h = Math.max(MIN_H, snap(origH - dy)); y = origY + origH - h; }
+        // Resize the selection's bounding box off its fixed opposite edge (same math whether the
+        // selection is one node or many), then scale every member proportionally into the new box.
+        let nx = box.x, ny = box.y, nw = box.w, nh = box.h;
+        if (corner.includes('e')) nw = Math.max(MIN_W, snap(box.w + dx));
+        if (corner.includes('s')) nh = Math.max(MIN_H, snap(box.h + dy));
+        if (corner.includes('w')) { nw = Math.max(MIN_W, snap(box.w - dx)); nx = box.x + box.w - nw; }
+        if (corner.includes('n')) { nh = Math.max(MIN_H, snap(box.h - dy)); ny = box.y + box.h - nh; }
         // Lock aspect ratio: on corner handles, drive height from width and re-anchor if needed
-        if (d.lockAspect && corner.length === 2 && origH) {
-          h = Math.max(MIN_H, Math.round(w * origH / origW));
-          if (corner.includes('n')) y = origY + origH - h;
+        if (d.lockAspect && corner.length === 2 && box.h) {
+          nh = Math.max(MIN_H, Math.round(nw * box.h / box.w));
+          if (corner.includes('n')) ny = box.y + box.h - nh;
         }
-        onUpdateNode(d.id, { x, y, w, h });
+        const sx = nw / box.w, sy = nh / box.h;
+        d.ids.forEach(id => {
+          const g = d.geoms[id];
+          if (!g) return;
+          onUpdateNode(id, {
+            x: Math.round(nx + (g.x - box.x) * sx),
+            y: Math.round(ny + (g.y - box.y) * sy),
+            w: Math.max(1, Math.round(g.w * sx)),
+            h: Math.max(1, Math.round(g.h * sy)),
+          });
+        });
       } else if (d.type === 'pan') {
         const nx = d.origPanX + rawDx, ny = d.origPanY + rawDy;
         transformRef.current = { ...transformRef.current, x: nx, y: ny };
@@ -309,6 +336,7 @@ function Canvas({ nodes, connections, settings = {}, artboard, device, selectedI
       if (guidesRef.current) { guidesRef.current = null; setGuides(null); }
       dragRef.current = null;
       setDraggingId(null);
+      setPanning(false);
     };
 
     document.addEventListener('mousemove', onMove);
@@ -319,16 +347,26 @@ function Canvas({ nodes, connections, settings = {}, artboard, device, selectedI
     };
   }, [onUpdateNode, onCommitDrag, onSelect, onSelectMany, onAddConnection, gridStep, artboard]);
 
-  // --- Scroll-wheel zoom ---
+  // Zoom to `nz`, holding the canvas point under (clientX, clientY) fixed on screen — so the wheel
+  // zooms toward the cursor and the +/– buttons zoom toward the viewport centre.
+  const zoomToPoint = (nz, clientX, clientY) => {
+    const vpRect = viewportRef.current?.getBoundingClientRect();
+    if (!vpRect) return;
+    const { x, y, z } = transformRef.current;
+    const z2 = Math.min(4, Math.max(0.15, nz));
+    const mx = clientX - vpRect.left, my = clientY - vpRect.top;
+    const t = { z: z2, x: mx - ((mx - x) / z) * z2, y: my - ((my - y) / z) * z2 };
+    transformRef.current = t; setTransform(t);
+  };
+
+  // --- Scroll-wheel zoom (anchored on the cursor) ---
   React.useEffect(() => {
     const el = viewportRef.current;
     if (!el) return;
     const handler = (e) => {
       e.preventDefault();
       const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
-      const newZ = Math.min(4, Math.max(0.15, transformRef.current.z * factor));
-      transformRef.current = { ...transformRef.current, z: newZ };
-      setTransform(t => ({ ...t, z: newZ }));
+      zoomToPoint(transformRef.current.z * factor, e.clientX, e.clientY);
     };
     el.addEventListener('wheel', handler, { passive: false });
     return () => el.removeEventListener('wheel', handler);
@@ -348,9 +386,8 @@ function Canvas({ nodes, connections, settings = {}, artboard, device, selectedI
   }, []);
 
   const adjustZoom = (delta) => {
-    const newZ = Math.min(4, Math.max(0.15, transformRef.current.z + delta));
-    transformRef.current = { ...transformRef.current, z: newZ };
-    setTransform(t => ({ ...t, z: newZ }));
+    const r = viewportRef.current?.getBoundingClientRect();
+    zoomToPoint(transformRef.current.z + delta, r ? r.left + r.width / 2 : 0, r ? r.top + r.height / 2 : 0);
   };
   const resetZoom = () => { transformRef.current = { x: 0, y: 0, z: 1 }; setTransform({ x: 0, y: 0, z: 1 }); };
   const fitToScreen = () => {
@@ -420,7 +457,7 @@ function Canvas({ nodes, connections, settings = {}, artboard, device, selectedI
     { key: 'w',  cursor: 'w-resize',  style: { top: '50%', left: -5, marginTop: -4 } },
   ];
 
-  const vpCursor = draggingId ? 'grabbing' : spaceHeld ? 'grab' : marqueeRect ? 'crosshair' : 'default';
+  const vpCursor = (draggingId || panning) ? 'grabbing' : spaceHeld ? 'grab' : marqueeRect ? 'crosshair' : 'default';
   const visibleNodes = nodes.filter(n => !n.hidden);
   const connFrom = connectDraft && nodes.find(n => n.id === connectDraft.fromId);
 
@@ -428,7 +465,12 @@ function Canvas({ nodes, connections, settings = {}, artboard, device, selectedI
     <div
       ref={viewportRef}
       style={{ flex: 1, minWidth: 0, overflow: 'hidden', position: 'relative', background: 'var(--bg-void)', cursor: vpCursor }}
-      onMouseDown={e => { if (e.button === 1 || (e.button === 0 && spaceRef.current)) startPan(e); }}
+      onMouseDown={e => {
+        if (e.button === 1 || (e.button === 0 && spaceRef.current)) { startPan(e); return; }
+        // Left-drag on the void beyond the canvas content (the viewport itself) pans the camera.
+        if (e.button === 0 && e.target === e.currentTarget) startPan(e);
+      }}
+      onClick={e => { if (e.target === e.currentTarget && !didDragRef.current) onSelect(null); didDragRef.current = false; }}
       onDragOver={e => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; }}
       onDrop={onDrop}
     >
@@ -439,7 +481,13 @@ function Canvas({ nodes, connections, settings = {}, artboard, device, selectedI
           transformOrigin: '0 0',
         }}
         onClick={() => { if (!didDragRef.current) onSelect(null); didDragRef.current = false; }}
-        onMouseDown={e => { if (e.button !== 0 || spaceRef.current) return; startMarquee(e); }}
+        onMouseDown={e => {
+          if (e.button !== 0 || spaceRef.current) return;
+          const { x: cx, y: cy } = toCanvas(e.clientX, e.clientY);
+          // Empty space inside the artboard marquee-selects; the void around it pans the camera.
+          if (artboard && cx >= 0 && cy >= 0 && cx <= artboard.w && cy <= artboard.h) startMarquee(e);
+          else startPan(e);
+        }}
         onContextMenu={openCanvasMenu}
       >
         {/* Device screen — the grid follows this artboard; the void is outside it */}
@@ -543,6 +591,22 @@ function Canvas({ nodes, connections, settings = {}, artboard, device, selectedI
                   <span>{n.name}</span>
                   {n.locked && <span style={{ opacity: 0.55 }}>· locked</span>}
                   <span style={{ opacity: 0.5 }}>{n.w}×{n.h}</span>
+                </div>
+              )}
+
+              {/* State-preview badge — makes it unmistakable that the selected node is showing a
+                  non-default interaction state (not the Default look), so edits here reading as "the
+                  default changed" is never a surprise. Sits at the node's top-right, clear of the name. */}
+              {sel && editingState !== 'default' && (
+                <div style={{
+                  position: 'absolute', top: n.y <= 20 ? 22 : -18, right: 0,
+                  display: 'flex', alignItems: 'center', gap: 4,
+                  fontSize: 10.5, fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap',
+                  color: '#0a0a0c', pointerEvents: 'none', zIndex: 13,
+                  background: 'var(--amber-base, #FB923C)', padding: '1px 6px', borderRadius: 3, fontWeight: 600,
+                }}>
+                  <i data-lucide="eye" style={{ width: 11, height: 11 }}></i>
+                  <span>Previewing: {editingStateLabel || 'state'}</span>
                 </div>
               )}
 

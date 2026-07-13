@@ -22,6 +22,11 @@ const STEP_PROPS = new Set(['flipH', 'flipV', 'borderStyle', 'blendMode', 'radii
 
 function lerpNum(a, b, u) { return a + (b - a) * u; }
 
+// Props that represent a spin angle rather than a bounded offset — on loop wrap these continue turning
+// in their established direction (mod 360) instead of tweening straight back to the raw first-key value,
+// which would visibly reverse the spin whenever the keys aren't exactly 360° apart (see sampleTrack).
+const ANGLE_PROPS = new Set(['rotation', 'iconRotate', 'btnIconRotate']);
+
 // Parse a colour to {r,g,b}; returns null for tokens/gradients/named colours (→ caller steps).
 function parseRGB(css) {
   if (typeof css !== 'string') return null;
@@ -50,24 +55,59 @@ function lerpVal(prop, a, b, u) {
   return u < 0.5 ? a : b;
 }
 
-// Value of one track at time `t` (clamped at the ends; segment eased by the *incoming* key's ease).
-function sampleTrack(tr, t) {
+// Value of one track at time `t`. Each interior segment is eased by its *incoming* key's ease.
+// Without opts the ends clamp (hold the first/last key). With `opts.wrap` + `opts.duration`, a looping
+// track instead tweens across the loop boundary — from the last key, over the gap to the clip end, and
+// on to the first key of the next cycle — so a repeating animation is seamless instead of holding then
+// snapping. The wrap tween is eased by the first key's ease (the key it settles onto).
+function sampleTrack(tr, t, opts) {
   const keys = (tr.keys || []).slice().sort((a, b) => a.t - b.t);
   if (!keys.length) return undefined;
-  if (t <= keys[0].t) return keys[0].value;
-  const last = keys[keys.length - 1];
-  if (t >= last.t) return last.value;
-  let i = 0;
-  while (i < keys.length - 1 && keys[i + 1].t <= t) i++;
-  const a = keys[i], b = keys[i + 1];
-  const span = b.t - a.t;
-  const u = span > 0 ? (t - a.t) / span : 1;
-  return lerpVal(tr.prop, a.value, b.value, applyEase(b.ease, u));
+  const first = keys[0], last = keys[keys.length - 1];
+  // Interior: normal segment between the two surrounding keys.
+  if (t > first.t && t < last.t) {
+    let i = 0;
+    while (i < keys.length - 1 && keys[i + 1].t <= t) i++;
+    const a = keys[i], b = keys[i + 1];
+    const span = b.t - a.t;
+    const u = span > 0 ? (t - a.t) / span : 1;
+    return lerpVal(tr.prop, a.value, b.value, applyEase(b.ease, u));
+  }
+  // Loop wrap: only when asked, over a real duration, with >1 distinct-valued keys that leave a real
+  // gap before repeating (if the keys already fill the clip, or the endpoints match, the plain hold is
+  // already seamless).
+  const duration = opts && opts.duration ? +opts.duration : 0;
+  const wrapSpan = (duration - last.t) + first.t;      // last key → clip end → first key (next cycle)
+  const canWrap = !!(opts && opts.wrap) && duration > 0 && keys.length > 1
+    && wrapSpan > 0 && first.value !== last.value;
+  if (canWrap) {
+    const el = t >= last.t ? (t - last.t) : ((duration - last.t) + t);
+    const u = el / wrapSpan;
+    let target = first.value;
+    if (ANGLE_PROPS.has(tr.prop) && typeof last.value === 'number' && typeof first.value === 'number') {
+      // Continue spinning the same way the track was already heading into its last key, landing on
+      // the angle nearest congruent (mod 360) to the authored first key — never a full turn (so it
+      // doesn't freeze) and never more than one (so speed stays roughly constant across the seam).
+      const prev = keys.length > 1 ? keys[keys.length - 2] : first;
+      const dir = last.value - prev.value;
+      if (dir < 0) {
+        const back = (((last.value - first.value) % 360) + 360) % 360;
+        target = last.value - (back || 360);
+      } else {
+        const fwd = (((first.value - last.value) % 360) + 360) % 360;
+        target = last.value + (fwd || 360);
+      }
+    }
+    return lerpVal(tr.prop, last.value, target, applyEase(first.ease, u));
+  }
+  // Default: clamp at the ends.
+  return t <= first.t ? first.value : last.value;
 }
-// Merge every track's sampled value into an override map { prop: value }.
-function sampleTracks(tracks, t) {
+// Merge every track's sampled value into an override map { prop: value }. `opts` (loop wrap) is
+// forwarded to each track — see sampleTrack.
+function sampleTracks(tracks, t, opts) {
   const out = {};
-  (tracks || []).forEach(tr => { const v = sampleTrack(tr, t); if (v !== undefined) out[tr.prop] = v; });
+  (tracks || []).forEach(tr => { const v = sampleTrack(tr, t, opts); if (v !== undefined) out[tr.prop] = v; });
   return out;
 }
 
@@ -121,10 +161,29 @@ function ensureTracks(state) {
   return dur ? { ...state, tracks, duration: dur } : { ...state, tracks };
 }
 
-// The node as it looks at time `t` in an animation state (base node + sampled track overrides).
+// The node as it looks at time `t` in an animation state: the state's RESTING POSE (base node merged
+// with any static overrides it stored in node.states[state.id]) with the sampled track values on top.
+// Folding in node.states[state.id] keeps props the user set while authoring the state — but never
+// keyframed (an icon glyph, a colour) — scoped to that state instead of leaking onto the shared base /
+// Default. No override layer (the common case) → pose is just base + tracks, exactly as before.
+// Merge sampled track overrides onto a base pose. Special-cases the Fill: a keyframed `fillColor` holds
+// the whole background as a CSS string (a solid, OR a gradient captured via fillBg), so it is the sole
+// authority for the fill while animating — a gradient sitting on the base/state resting pose must not
+// bleed through (fillBg() otherwise prioritises `.gradient`). Dropping it lets the sampled string win at
+// every t, so a Fill track can go solid → gradient → none across its keys.
+function applyPose(base, ov) {
+  const pose = Object.assign({}, base, ov);
+  if (ov && 'fillColor' in ov) pose.gradient = null;
+  return pose;
+}
+
 function poseAt(node, state, t) {
   const s = ensureTracks(state);
-  return { ...node, ...sampleTracks(s.tracks || [], t) };
+  // A looping state tweens across the loop boundary unless smoothing is explicitly turned off
+  // (loopWrap === false). Non-looping states clamp as before.
+  const opts = s.loop ? { wrap: s.loopWrap !== false, duration: stateDuration(s) } : null;
+  const base = (window.mergeState && s && s.id) ? window.mergeState(node, s.id) : node;
+  return applyPose(base, sampleTracks(s.tracks || [], t, opts));
 }
 
 window.animEase = applyEase;
@@ -136,4 +195,5 @@ window.tracksDuration = tracksDuration;
 window.stateDuration = stateDuration;
 window.framesToTracks = framesToTracks;
 window.ensureTracks = ensureTracks;
+window.applyPose = applyPose;
 window.poseAt = poseAt;

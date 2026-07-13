@@ -56,6 +56,10 @@ const TL_PROP = {
   disabled:     { label: 'Disabled',      icon: 'ban',                  hint: 'Toggle disabled state',       group: 'Style',      type: 'bool' },
 };
 
+// The full set of animatable property keys — the inspector's ◆ keyframe buttons gate on this so a
+// field only shows one when the timeline can actually animate that property.
+window.TL_ANIMATABLE = new Set(Object.keys(TL_PROP));
+
 // Props on every node, then the extras each kind adds. Text-bearing kinds get Text + Text color.
 const TL_UNIVERSAL = ['scale', 'rotation', 'x', 'y', 'skewX', 'skewY', 'w', 'h', 'opacity', 'fillColor', 'borderColor', 'radius', 'borderWidth'];
 const TL_KIND_PROPS = {
@@ -77,6 +81,8 @@ const TL_EASES = [
   { v: 'linear', label: 'Linear' }, { v: 'ease-out', label: 'Ease out' },
   { v: 'ease-in-out', label: 'Ease in-out' }, { v: 'ease-in', label: 'Ease in' },
 ];
+// Compact labels for the per-segment easing pills drawn between keyframes.
+const TL_EASE_SHORT = { linear: 'Lin', 'ease-out': 'Out', 'ease-in-out': 'In-Out', 'ease-in': 'In' };
 const TL_GROUP_ORDER = ['Transform', 'Size', 'Appearance', 'Content', 'Style', 'Other'];
 const TL_GROUP_ICON = { Transform: 'move', Size: 'ruler-dimension-line', Appearance: 'palette', Content: 'shapes', Style: 'sliders-horizontal', Other: 'ellipsis' };
 
@@ -99,7 +105,11 @@ function tlSeed(node, prop) {
   if (t === 'text') return cur != null ? cur : '';
   if (t === 'select') return (cur != null && cur !== '') ? cur : (TL_PROP[prop].options[0]);
   if (t === 'icon') return (cur != null && cur !== '') ? cur : (prop === 'btnIcon' ? 'arrow-right' : 'star');
-  if (t === 'color') return (cur != null && cur !== '') ? cur : (TL_COLOR_DEFAULT[prop] || '#888888');
+  if (t === 'color') {
+    // Fill seeds from the whole background (gradient or solid) so a new track starts on what's on screen.
+    if (prop === 'fillColor' && window.fillBg) { const f = window.fillBg(node); if (f) return f; }
+    return (cur != null && cur !== '') ? cur : (TL_COLOR_DEFAULT[prop] || '#888888');
+  }
   if (cur != null && cur !== '' && !isNaN(+cur)) return +cur;
   return TL_NUM_DEFAULT[prop] != null ? TL_NUM_DEFAULT[prop] : (prop === 'w' ? (node && node.w) || 160 : prop === 'h' ? (node && node.h) || 60 : 0);
 }
@@ -119,12 +129,19 @@ function tlExtraProps(node, listed) {
   });
 }
 
+// Merge keyframe selections (set union on {ti,ki}) without duplicates.
+function mergeSel(prev, add) { const out = prev.slice(); add.forEach(h => { if (!out.some(s => s.ti === h.ti && s.ki === h.ki)) out.push(h); }); return out; }
+
 function TimelineEditor(props) {
   const node = props.node, state = props.state, pageMode = !!props.pageMode;
   const pageNodes = props.pageNodes || [], palette = props.palette || [];
   const onAddTrack = props.onAddTrack, onDeleteTrack = props.onDeleteTrack;
   const onAddKey = props.onAddKey, onUpdateKey = props.onUpdateKey, onDeleteKey = props.onDeleteKey;
-  const onSetDuration = props.onSetDuration, onSetLoop = props.onSetLoop;
+  const onAddKeys = props.onAddKeys, onDeleteKeys = props.onDeleteKeys; // batch ops for multi-select
+  const onKeyCheckpoint = props.onKeyCheckpoint; // record one undo step before a keyframe drag mutates
+  const onKeyCoalesce = props.onKeyCoalesce; // coalesced checkpoint for streamed edits (multi-key retime)
+  const onSetDuration = props.onSetDuration, onSetLoop = props.onSetLoop, onSetLoopWrap = props.onSetLoopWrap;
+  const onApplyPresetToTrack = props.onApplyPresetToTrack; // per-track loop presets (component mode only)
   // Scope switch: 'component' animates one node's own props, 'page' animates every node on the page.
   // `canComponent` is false when there's no component animation to jump back to (nothing selected
   // that owns one), which greys the Component half rather than switching to an empty editor.
@@ -138,20 +155,36 @@ function TimelineEditor(props) {
   const duration = Math.max(1, (state && state.duration) || (window.tracksDuration ? window.tracksDuration(tracks) : 0) || 1000);
 
   const [playhead, setPlayhead] = React.useState(0);
+  // Publish the live playhead so the Inspector's key buttons can drop a keyframe at the current time.
+  React.useEffect(() => { if (props.playheadRef) props.playheadRef.current = playhead; }, [playhead, props.playheadRef]);
   const [playing, setPlaying] = React.useState(false);
-  const [sel, setSel] = React.useState(null);          // { ti, ki }
+  // Multi-selection of keyframes: an array of { ti, ki }. `sel` = the primary (last-picked) key, kept
+  // for the single-key edit bar; helpers below test / mutate membership.
+  const [selKeys, setSelKeys] = React.useState([]);
+  const [marquee, setMarquee] = React.useState(null);  // rubber-band rect {x0,y0,x1,y1} in content coords
+  const sel = selKeys.length ? selKeys[selKeys.length - 1] : null;
+  const isSelKey = (ti, ki) => selKeys.some(s => s.ti === ti && s.ki === ki);
   const [zoom, setZoom] = React.useState(0.5);         // px per ms
   const [onion, setOnion] = React.useState(false);
   const [stageMode, setStageMode] = React.useState('normal'); // 'min' | 'normal' | 'max'
   const [addNode, setAddNode] = React.useState('');
   const [picker, setPicker] = React.useState(false);
   const [pq, setPq] = React.useState('');
+  const [presetOpen, setPresetOpen] = React.useState(false); // preset menu (filtered to selected track)
+  const [presetDlg, setPresetDlg] = React.useState(null);    // { presetId } while the config dialog is open
+  const [presetTrack, setPresetTrack] = React.useState(null); // index of the track selected for presets
 
   const rafRef = React.useRef(0);
   const dragRef = React.useRef(null);
   const laneRef = React.useRef(null);
+  const contentRef = React.useRef(null);               // inner (relative) lane content — marquee coord origin
+  const clipRef = React.useRef(null);                  // keyframe clipboard { items:[{prop,nodeId,t,value,ease}], minT }
+  const pendingSelRef = React.useRef(null);            // [{ti,t}] to reselect once `tracks` reflects a paste
   const zoomRef = React.useRef(zoom); zoomRef.current = zoom;
   const durRef = React.useRef(duration); durRef.current = duration;
+  const tracksRef = React.useRef(tracks); tracksRef.current = tracks;
+  const selKeysRef = React.useRef(selKeys); selKeysRef.current = selKeys;
+  const phRef = React.useRef(playhead); phRef.current = playhead;
 
   const px = (t) => t * zoom;
   const durX = px(duration);                          // x of the duration boundary
@@ -160,6 +193,43 @@ function TimelineEditor(props) {
   const overrun = tracks.length ? Math.max(durX, 1600) : 0;
   const laneW = durX + overrun + 48;
   React.useEffect(() => { if (window.renderLucideIcons) window.renderLucideIcons(); });
+
+  // --- Multi-select clipboard ops (copy / cut / paste / duplicate) + select-all / delete ------------
+  // Read live state through refs so the document-level key handler never captures a stale closure.
+  const selItems = () => selKeysRef.current.map(s => {
+    const tr = tracksRef.current[s.ti]; const k = tr && (tr.keys || [])[s.ki];
+    return k ? { prop: tr.prop, nodeId: tr.nodeId, t: k.t, value: k.value, ease: k.ease || 'ease-out' } : null;
+  }).filter(Boolean);
+  // Insert copied items so their earliest key lands at `atT`, matching each back to its track by prop
+  // (+ nodeId in scene mode). Queues the inserted (ti,t) to reselect once `tracks` reflects the add.
+  const insertItems = (items, baseT, atT) => {
+    if (!onAddKeys || !items.length) return;
+    const adds = [], want = [];
+    items.forEach(it => {
+      const ti = tracksRef.current.findIndex(tr => tr.prop === it.prop && (!pageMode || tr.nodeId === it.nodeId));
+      if (ti < 0) return;
+      const t = Math.max(0, Math.round(atT + (it.t - baseT)));
+      adds.push({ ti, t, value: it.value, ease: it.ease }); want.push({ ti, t });
+    });
+    if (!adds.length) return;
+    onAddKeys(adds); pendingSelRef.current = want;
+  };
+  const doCopy = () => { const items = selItems(); if (items.length) clipRef.current = { items, minT: Math.min(...items.map(i => i.t)) }; };
+  const doDelete = () => { const s = selKeysRef.current; if (s.length && onDeleteKeys) { onDeleteKeys(s); setSelKeys([]); } };
+  const doCut = () => { doCopy(); doDelete(); };
+  const doPaste = () => { const c = clipRef.current; if (c && c.items.length) insertItems(c.items, c.minT, Math.round(phRef.current)); };
+  // Duplicate clones the selection just after itself (shift by its own span, or 150ms for a single key).
+  const doDuplicate = () => { const items = selItems(); if (!items.length) return; const ts = items.map(i => i.t); const minT = Math.min(...ts), maxT = Math.max(...ts); insertItems(items, minT, minT + ((maxT - minT) || 150)); };
+  const selectAllKeys = () => { const all = []; tracksRef.current.forEach((tr, ti) => (tr.keys || []).forEach((_, ki) => all.push({ ti, ki }))); setSelKeys(all); };
+  const setSelEase = (ease) => selKeysRef.current.forEach(s => onUpdateKey && onUpdateKey(s.ti, s.ki, { ease }));
+
+  // After a paste/duplicate lands, resolve each requested (ti,t) to a concrete key index and select it.
+  React.useEffect(() => {
+    const want = pendingSelRef.current; if (!want) return; pendingSelRef.current = null;
+    const next = [];
+    want.forEach(w => { const tr = tracks[w.ti]; if (!tr) return; const ki = (tr.keys || []).findIndex(k => k.t === w.t); if (ki >= 0) next.push({ ti: w.ti, ki }); });
+    if (next.length) setSelKeys(next);
+  }, [tracks]);
 
   // Playback loop.
   React.useEffect(() => {
@@ -174,16 +244,53 @@ function TimelineEditor(props) {
     return () => cancelAnimationFrame(rafRef.current);
   }, [playing, duration, state && state.loop]);
 
-  // Keyframe drag / playhead scrub (document-level so the pointer can leave the lane).
+  // Keyframe drag / playhead scrub / marquee (document-level so the pointer can leave the lane).
   React.useEffect(() => {
     const mm = (e) => {
       const d = dragRef.current; if (!d) return;
+      if (d.type === 'marquee') {
+        const cr = contentRef.current ? contentRef.current.getBoundingClientRect() : { left: 0, top: 0 };
+        d.x1 = e.clientX - cr.left; d.y1 = e.clientY - cr.top; d.moved = true;
+        setMarquee({ x0: d.x0, y0: d.y0, x1: d.x1, y1: d.y1 });
+        return;
+      }
       const rect = laneRef.current ? laneRef.current.getBoundingClientRect() : { left: 0 };
       const t = Math.max(0, Math.round((e.clientX - rect.left + (laneRef.current ? laneRef.current.scrollLeft : 0)) / zoomRef.current));
       if (d.type === 'play') { setPlayhead(Math.min(durRef.current, t)); return; }
-      if (d.type === 'key') { d.moved = true; onUpdateKey && onUpdateKey(d.ti, d.ki, { t: Math.min(durRef.current, t) }); }
+      if (d.type === 'key') {
+        // Ignore sub-threshold jitter so a plain click selects without nudging the key. Only once the
+        // pointer has actually travelled do we begin moving — and we snapshot one undo step first.
+        if (!d.moved) {
+          if (Math.abs(e.clientX - d.startX) < 4) return;
+          d.moved = true;
+          if (d.checkpoint) { d.checkpoint(); d.checkpoint = null; }
+        }
+        // Drag the whole selection together: shift every captured key by the same time delta.
+        const delta = Math.min(durRef.current, t) - d.anchorT0;
+        (d.dragSet || []).forEach(m => onUpdateKey && onUpdateKey(m.ti, m.ki, { t: Math.max(0, Math.min(durRef.current, Math.round(m.t0 + delta))) }));
+      }
     };
-    const mu = () => { dragRef.current = null; };
+    const mu = () => {
+      const d = dragRef.current;
+      if (d && d.type === 'marquee') {
+        if (d.moved && contentRef.current) {
+          const cr = contentRef.current.getBoundingClientRect();
+          const cMinX = cr.left + Math.min(d.x0, d.x1), cMaxX = cr.left + Math.max(d.x0, d.x1);
+          const cMinY = cr.top + Math.min(d.y0, d.y1), cMaxY = cr.top + Math.max(d.y0, d.y1);
+          const hits = [];
+          contentRef.current.querySelectorAll('.tl-key').forEach(el => {
+            const r = el.getBoundingClientRect(), cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+            if (cx >= cMinX && cx <= cMaxX && cy >= cMinY && cy <= cMaxY) {
+              const ti = +el.dataset.ti, ki = +el.dataset.ki;
+              if (!isNaN(ti) && !isNaN(ki)) hits.push({ ti, ki });
+            }
+          });
+          setSelKeys(prev => d.additive ? mergeSel(prev, hits) : hits);
+        }
+        setMarquee(null);
+      }
+      dragRef.current = null;
+    };
     document.addEventListener('mousemove', mm); document.addEventListener('mouseup', mu);
     return () => { document.removeEventListener('mousemove', mm); document.removeEventListener('mouseup', mu); };
   }, [onUpdateKey]);
@@ -206,23 +313,67 @@ function TimelineEditor(props) {
     return () => el.removeEventListener('wheel', onWheel);
   }, []);
 
-  // Keyboard: space play/pause, ⌫ delete key, ←/→ nudge playhead. Ignored while typing.
+  // Keyboard: Space play/pause · ⌫ delete selection · ←/→ nudge playhead · Ctrl/⌘ C/X/V/D
+  // copy/cut/paste/duplicate · Ctrl/⌘ A select all. Ignored while typing in a field.
   React.useEffect(() => {
     const onKey = (e) => {
       const t = e.target; if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return;
-      if (e.code === 'Space') { e.preventDefault(); setPlaying(p => !p); }
-      else if ((e.key === 'Delete' || e.key === 'Backspace') && sel) { e.preventDefault(); onDeleteKey && onDeleteKey(sel.ti, sel.ki); setSel(null); }
+      const meta = e.metaKey || e.ctrlKey, k = e.key.toLowerCase();
+      if (meta && k === 'c') { e.preventDefault(); doCopy(); }
+      else if (meta && k === 'x') { e.preventDefault(); doCut(); }
+      else if (meta && k === 'v') { e.preventDefault(); doPaste(); }
+      else if (meta && k === 'd') { e.preventDefault(); doDuplicate(); }
+      else if (meta && k === 'a') { e.preventDefault(); selectAllKeys(); }
+      else if (e.code === 'Space') { e.preventDefault(); setPlaying(p => !p); }
+      else if ((e.key === 'Delete' || e.key === 'Backspace') && selKeysRef.current.length) { e.preventDefault(); doDelete(); }
       else if (e.key === 'ArrowLeft') { setPlayhead(p => Math.max(0, p - (e.shiftKey ? 50 : 10))); }
-      else if (e.key === 'ArrowRight') { setPlayhead(p => Math.min(duration, p + (e.shiftKey ? 50 : 10))); }
+      else if (e.key === 'ArrowRight') { setPlayhead(p => Math.min(durRef.current, p + (e.shiftKey ? 50 : 10))); }
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [sel, duration, onDeleteKey]);
+  }, []); // eslint-disable-line
 
   const targetNode = pageMode ? (pageNodes.find(n => n.id === addNode) || pageNodes[0] || node) : node;
-  const sampleAt = (n, t) => { const nt = pageMode ? tracks.filter(tr => tr.nodeId === (n && n.id)) : tracks; return window.sampleTracks ? { ...n, ...window.sampleTracks(nt, t) } : n; };
+  // Preview sampling mirrors playback: when looping, blend across the loop boundary (unless smoothing
+  // is off) so the stage preview matches how the clip actually repeats.
+  const wrapOpts = (state && state.loop) ? { wrap: state.loopWrap !== false, duration } : null;
+  const sampleAt = (n, t) => {
+    const nt = pageMode ? tracks.filter(tr => tr.nodeId === (n && n.id)) : tracks;
+    // Component mode previews over the state's resting pose (base + node.states[state.id] overrides),
+    // mirroring poseAt so props set on the state but not keyframed show here too. The scene timeline
+    // has no per-node state layer, so its nodes stay raw.
+    const base = (!pageMode && window.mergeState && state && state.id) ? window.mergeState(n, state.id) : n;
+    if (!window.sampleTracks) return base;
+    const ov = window.sampleTracks(nt, t, wrapOpts);
+    return window.applyPose ? window.applyPose(base, ov) : { ...base, ...ov };
+  };
 
   const isTracked = (prop) => tracks.some(tr => tr.prop === prop && (!pageMode || tr.nodeId === (addNode || (pageNodes[0] && pageNodes[0].id))));
+
+  // ── Loop presets (component mode) ── The Presets button is armed by selecting a TRACK; the menu is
+  // then filtered to motions that fit that track's property, and each opens a config dialog.
+  const presetsEnabled = !pageMode && !!onApplyPresetToTrack && !!window.ANIM_PRESETS;
+  const selTrackIdx = (presetTrack != null && presetTrack < tracks.length) ? presetTrack : null; // guard against deletes
+  const selTrackObj = selTrackIdx != null ? tracks[selTrackIdx] : null;
+  const selProp = selTrackObj ? selTrackObj.prop : null;
+  const selCat = selProp && window.apCategory ? window.apCategory(selProp) : null;
+  const presetsForSel = (selCat && window.apPresetsFor) ? window.apPresetsFor(selCat) : [];
+  // The value a preset builds around: the track's first keyframe, else the node's current value.
+  const selBaseVal = selTrackObj
+    ? ((selTrackObj.keys && selTrackObj.keys.length)
+        ? selTrackObj.keys.slice().sort((a, b) => a.t - b.t)[0].value
+        : (targetNode ? targetNode[selProp] : 0))
+    : 0;
+  // Live preview for the dialog: pose the node with the selected track's keys swapped for `keys`,
+  // sampled at `t` over a tentative `dur` (so duration/param tweaks animate immediately).
+  const previewPoseNode = (keys, t, dur) => {
+    const override = tracks.map((tr, i) => i === selTrackIdx ? { ...tr, keys } : tr);
+    const base = (window.mergeState && state && state.id) ? window.mergeState(targetNode, state.id) : targetNode;
+    const opts = { wrap: true, duration: Math.max(50, dur || duration) };
+    if (!window.sampleTracks) return base;
+    const ov = window.sampleTracks(override, t, opts);
+    return window.applyPose ? window.applyPose(base, ov) : { ...base, ...ov };
+  };
 
   const addProp = (prop) => {
     if (!onAddTrack || isTracked(prop)) return;
@@ -239,6 +390,34 @@ function TimelineEditor(props) {
     const v = window.sampleTrack ? window.sampleTrack(tr, t) : undefined;
     const value = v !== undefined ? v : tlSeed(targetNode, tr.prop);
     onAddKey(ti, t, value);
+  };
+
+  // Begin a rubber-band selection from empty lane space. Keys own their own drag (stopPropagation) and
+  // the ruler owns scrubbing, so both are skipped here. Shift/⌘/Ctrl adds to the current selection.
+  const startMarquee = (e) => {
+    if (e.button !== 0 || !contentRef.current) return;
+    if (e.target.closest('.tl-key') || e.target.closest('.tl-ruler')) return;
+    const cr = contentRef.current.getBoundingClientRect();
+    const x0 = e.clientX - cr.left, y0 = e.clientY - cr.top;
+    const additive = e.shiftKey || e.metaKey || e.ctrlKey;
+    dragRef.current = { type: 'marquee', x0, y0, x1: x0, y1: y0, moved: false, additive };
+    if (!additive) setSelKeys([]);
+  };
+  // Click a keyframe: plain = select just it (or keep the group if it's already in one) and drag the
+  // group; Shift/⌘/Ctrl = toggle it in the selection. Captures each dragged key's start time up front.
+  const startKeyDrag = (e, ti, ki, k) => {
+    e.stopPropagation();
+    const additive = e.shiftKey || e.metaKey || e.ctrlKey;
+    const already = isSelKey(ti, ki);
+    let next;
+    if (additive) { next = already ? selKeys.filter(s => !(s.ti === ti && s.ki === ki)) : [...selKeys, { ti, ki }]; setSelKeys(next); }
+    else { next = already ? selKeys : [{ ti, ki }]; if (!already) setSelKeys(next); }
+    const members = (additive && already) ? [] : next; // toggling off → nothing to drag
+    // Anchor on the CURSOR's time at grab (not the key's), so the first move has zero delta — no snap.
+    const rect = laneRef.current ? laneRef.current.getBoundingClientRect() : { left: 0 };
+    const grabT = Math.max(0, Math.round((e.clientX - rect.left + (laneRef.current ? laneRef.current.scrollLeft : 0)) / zoomRef.current));
+    dragRef.current = { type: 'key', ti, ki, moved: false, anchorT0: grabT, startX: e.clientX, checkpoint: onKeyCheckpoint,
+      dragSet: members.map(s => { const kk = tracks[s.ti] && tracks[s.ti].keys[s.ki]; return { ti: s.ti, ki: s.ki, t0: kk ? kk.t : 0 }; }) };
   };
 
   const selTrack = sel ? tracks[sel.ti] : null;
@@ -298,11 +477,15 @@ function TimelineEditor(props) {
           <button type="button" title={playing ? 'Pause (space)' : 'Play (space)'} onClick={() => setPlaying(p => !p)} style={{ ...tlBtn, background: 'var(--surface-hover)', width: 30 }}><i data-lucide={playing ? 'pause' : 'play'} style={tlIco}></i></button>
           <button type="button" title="Stop" onClick={() => { setPlaying(false); setPlayhead(0); }} style={tlBtn}><i data-lucide="square" style={tlIco}></i></button>
         </div>
-        <span style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', minWidth: 92 }}>{fmt(playhead)} / {fmt(duration)}</span>
+        <TLTimeField playhead={playhead} duration={duration} onSet={t => setPlayhead(t)} onBeginEdit={() => setPlaying(false)} />
         <label style={tlField}>Duration
           <TLScrub value={Math.round(duration)} min={50} step={50} onChange={v => onSetDuration && onSetDuration(Math.max(50, v))} width={54} suffix="ms" />
         </label>
         <Switch label="Loop" checked={!!(state && state.loop)} onChange={on => onSetLoop && onSetLoop(on)} />
+        {state && state.loop && onSetLoopWrap && (
+          <Switch label="Smooth loop" checked={state.loopWrap !== false} onChange={on => onSetLoopWrap(on)}
+            title="Tween from the last keyframe back to the first so the loop has no snap" />
+        )}
         <div style={{ display: 'flex', alignItems: 'center', gap: 2, marginLeft: 2 }}>
           <button type="button" title="Zoom out" onClick={() => setZoom(z => Math.max(0.05, z / 1.3))} style={tlBtn}><i data-lucide="zoom-out" style={tlIco}></i></button>
           <span style={{ fontSize: 10.5, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', width: 34, textAlign: 'center' }}>{Math.round(zoom * 100)}%</span>
@@ -315,7 +498,19 @@ function TimelineEditor(props) {
               {pageNodes.map(n => <option key={n.id} value={n.id}>{n.name}</option>)}
             </select>
           )}
-          <button type="button" onClick={() => setPicker(p => !p)}
+          {presetsEnabled && (() => {
+            const armed = selProp != null && presetsForSel.length > 0;
+            const title = selProp == null ? 'Select a track first, then apply a looping preset'
+              : (armed ? `Looping presets for ${tlMeta(selProp).label}` : `No presets for ${tlMeta(selProp).label}`);
+            return (
+              <button type="button" title={title} disabled={!armed}
+                onClick={() => { if (armed) { setPresetOpen(p => !p); setPicker(false); } }}
+                style={{ flex: 'none', whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 7, height: 28, padding: '0 12px', border: '1px solid var(--border-default)', background: armed ? 'var(--surface-hover)' : 'transparent', color: armed ? 'var(--text-primary)' : 'var(--text-disabled)', fontSize: 12.5, fontWeight: 600, borderRadius: 4, cursor: armed ? 'pointer' : 'not-allowed', opacity: armed ? 1 : 0.6 }}>
+                <i data-lucide="sparkles" style={{ width: 14, height: 14, flex: 'none' }}></i>Presets
+              </button>
+            );
+          })()}
+          <button type="button" onClick={() => { setPicker(p => !p); setPresetOpen(false); }}
             style={{ flex: 'none', whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 7, height: 28, padding: '0 12px', border: '1px solid var(--action-solid)', background: 'var(--action-solid)', color: 'var(--action-solid-text)', fontSize: 12.5, fontWeight: 600, borderRadius: 4, cursor: 'pointer' }}>
             <i data-lucide="plus" style={{ width: 14, height: 14, flex: 'none' }}></i>Animate a property
           </button>
@@ -335,14 +530,6 @@ function TimelineEditor(props) {
             </button>
           )}
         </div>
-      </div>
-
-      {/* Hint strip — always-on discoverability for the mouse gestures */}
-      <div style={{ flex: 'none', display: 'flex', alignItems: 'center', gap: 16, padding: '5px 14px', borderBottom: '1px solid var(--border-subtle)', background: 'var(--bg-app)', fontSize: 11, color: 'var(--text-muted)', overflowX: 'auto', whiteSpace: 'nowrap' }}>
-        <span style={tlHint}><b style={tlHintKey}>Double-click</b> a track to drop a keyframe</span>
-        <span style={tlHint}><b style={tlHintKey}>Drag</b> a ◇ to retime it</span>
-        <span style={tlHint}><b style={tlHintKey}>Scroll</b> to zoom · <b style={tlHintKey}>Shift-scroll</b> to pan</span>
-        <span style={tlHint}><b style={tlHintKey}>Space</b> play/pause · <b style={tlHintKey}>⌫</b> delete key</span>
       </div>
 
       <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
@@ -383,13 +570,16 @@ function TimelineEditor(props) {
               {tracks.map((tr, ti) => {
                 const m = tlMeta(tr.prop);
                 const nn = pageMode ? (pageNodes.find(n => n.id === tr.nodeId) || {}).name : null;
-                const active = sel && sel.ti === ti;
+                const active = selKeys.some(s => s.ti === ti);
+                const isSel = presetsEnabled && selTrackIdx === ti; // selected for presets
                 return (
-                  <div key={ti} className="tl-track" style={{ height: 34, boxSizing: 'border-box', borderBottom: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', gap: 7, padding: '0 6px 0 10px', fontSize: 12, background: active ? 'var(--surface-hover)' : 'transparent' }}>
-                    <i data-lucide={m.icon} style={{ width: 13, height: 13, color: 'var(--text-secondary)', flex: 'none' }}></i>
+                  <div key={ti} className="tl-track" onClick={presetsEnabled ? () => setPresetTrack(ti) : undefined}
+                    title={presetsEnabled ? 'Click to select this track — then use Presets' : undefined}
+                    style={{ height: 34, boxSizing: 'border-box', borderBottom: '1px solid var(--border-subtle)', borderLeft: `2px solid ${isSel ? 'var(--action-solid)' : 'transparent'}`, display: 'flex', alignItems: 'center', gap: 7, padding: '0 6px 0 8px', fontSize: 12, cursor: presetsEnabled ? 'pointer' : 'default', background: isSel ? 'var(--surface-active, var(--surface-hover))' : (active ? 'var(--surface-hover)' : 'transparent') }}>
+                    <i data-lucide={m.icon} style={{ width: 13, height: 13, color: isSel ? 'var(--action-solid)' : 'var(--text-secondary)', flex: 'none' }}></i>
                     <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-primary)' }}>{nn ? nn + ' · ' : ''}{m.label}</span>
-                    <button type="button" className="tl-showhover" title="Add keyframe here" onClick={() => addKeyAt(ti)} style={tlBtn}><i data-lucide="diamond-plus" style={tlIco}></i></button>
-                    <button type="button" className="tl-showhover" title="Delete track" onClick={() => { onDeleteTrack && onDeleteTrack(ti); setSel(null); }} style={tlBtn}><i data-lucide="trash-2" style={tlIco}></i></button>
+                    <button type="button" className="tl-showhover" title="Add keyframe here" onClick={(e) => { e.stopPropagation(); addKeyAt(ti); }} style={tlBtn}><i data-lucide="diamond-plus" style={tlIco}></i></button>
+                    <button type="button" className="tl-showhover" title="Delete track" onClick={(e) => { e.stopPropagation(); onDeleteTrack && onDeleteTrack(ti); setSelKeys([]); }} style={tlBtn}><i data-lucide="trash-2" style={tlIco}></i></button>
                   </div>
                 );
               })}
@@ -402,9 +592,9 @@ function TimelineEditor(props) {
 
             {/* Lanes */}
             <div ref={laneRef} style={{ flex: 1, minWidth: 0, overflowX: 'auto', overflowY: 'hidden', position: 'relative' }}>
-              <div style={{ position: 'relative', width: laneW, minWidth: '100%', minHeight: '100%' }}>
+              <div ref={contentRef} onMouseDown={startMarquee} style={{ position: 'relative', width: laneW, minWidth: '100%', minHeight: '100%' }}>
                 {/* Ruler */}
-                <div onMouseDown={e => { dragRef.current = { type: 'play' }; const rect = laneRef.current.getBoundingClientRect(); setPlayhead(Math.max(0, Math.min(duration, Math.round((e.clientX - rect.left + laneRef.current.scrollLeft) / zoom)))); }}
+                <div className="tl-ruler" onMouseDown={e => { dragRef.current = { type: 'play' }; const rect = laneRef.current.getBoundingClientRect(); setPlayhead(Math.max(0, Math.min(duration, Math.round((e.clientX - rect.left + laneRef.current.scrollLeft) / zoom)))); }}
                   style={{ height: 26, boxSizing: 'border-box', background: 'var(--surface)', borderBottom: '1px solid var(--border-subtle)', cursor: 'ew-resize', position: 'relative', zIndex: 4 }}>
                   {ticks.map(t => (
                     <div key={t} style={{ position: 'absolute', left: px(t), top: 0, height: '100%', borderLeft: '1px solid var(--border-subtle)', paddingLeft: 4, fontSize: 9, fontFamily: 'var(--font-mono)', color: 'var(--text-disabled)', opacity: t > duration ? 0.4 : 1, display: 'flex', alignItems: 'center' }}>{Math.round(t)}</div>
@@ -422,31 +612,84 @@ function TimelineEditor(props) {
 
                 {tracks.length === 0 && <TLEmpty onPick={() => setPicker(true)} />}
 
-                {tracks.map((tr, ti) => (
+                {tracks.map((tr, ti) => {
+                  const sorted = (tr.keys || []).map((k, ki) => ({ k, ki })).sort((a, b) => a.k.t - b.k.t);
+                  return (
                   <div key={ti} className="tl-lane" style={{ position: 'relative', height: 34, boxSizing: 'border-box', borderBottom: '1px solid var(--border-subtle)', cursor: 'copy' }}
                     onDoubleClick={e => { const rect = laneRef.current.getBoundingClientRect(); const t = Math.max(0, Math.round((e.clientX - rect.left + laneRef.current.scrollLeft) / zoom)); setPlayhead(t); addKeyAt(ti, t); }}>
-                    {(tr.keys || []).length > 1 && (() => { const ks = tr.keys.slice().sort((a, b) => a.t - b.t); return (
-                      <div style={{ position: 'absolute', left: px(ks[0].t), top: 16, height: 2, width: px(ks[ks.length - 1].t) - px(ks[0].t), background: 'var(--border-strong)', zIndex: 1 }} />
-                    ); })()}
-                    {(tr.keys || []).map((k, ki) => {
-                      const active = sel && sel.ti === ti && sel.ki === ki;
-                      const col = tlType(tr.prop) === 'color' && typeof k.value === 'string' ? k.value : null;
+                    {sorted.length > 1 && (
+                      <div style={{ position: 'absolute', left: px(sorted[0].k.t), top: 16, height: 2, width: px(sorted[sorted.length - 1].k.t) - px(sorted[0].k.t), background: 'var(--border-strong)', zIndex: 1 }} />
+                    )}
+                    {/* Per-segment easing pills — the curve applied INTO the right-hand key. Hover the lane to
+                        reveal them; click to cycle linear → out → in-out → in. Hidden where the gap is tight. */}
+                    {sorted.slice(1).map((b, i) => {
+                      const a = sorted[i]; if (px(b.k.t) - px(a.k.t) < 30) return null;
                       return (
-                        <div key={ki} className="tl-key" title={`${tlMeta(tr.prop).label} = ${k.value} @ ${Math.round(k.t)}ms — drag to retime, click to edit`}
-                          onMouseDown={e => { e.stopPropagation(); dragRef.current = { type: 'key', ti, ki, moved: false }; setSel({ ti, ki }); }}
+                        <button key={'e' + b.ki} type="button" className="tl-ease"
+                          title={`Ease into this ${tlMeta(tr.prop).label} keyframe: ${b.k.ease || 'ease-out'} — click to change`}
+                          onMouseDown={e => e.stopPropagation()}
+                          onClick={e => { e.stopPropagation(); const order = TL_EASES.map(x => x.v); const cur = Math.max(0, order.indexOf(b.k.ease || 'ease-out')); onUpdateKey && onUpdateKey(ti, b.ki, { ease: order[(cur + 1) % order.length] }); }}
+                          style={{ position: 'absolute', left: (px(a.k.t) + px(b.k.t)) / 2, top: 1, transform: 'translateX(-50%)', height: 13, padding: '0 4px', display: 'inline-flex', alignItems: 'center', border: '1px solid var(--border-subtle)', borderRadius: 7, background: 'var(--surface-raised)', color: 'var(--text-muted)', fontSize: 8.5, fontFamily: 'var(--font-mono)', lineHeight: 1, cursor: 'pointer', zIndex: 3, whiteSpace: 'nowrap' }}>
+                          {TL_EASE_SHORT[b.k.ease || 'ease-out'] || '~'}
+                        </button>
+                      );
+                    })}
+                    {sorted.map(({ k, ki }) => {
+                      const active = isSelKey(ti, ki);
+                      const col = tlType(tr.prop) === 'color' && typeof k.value === 'string' ? k.value : null;
+                      const shownVal = (typeof k.value === 'string' && /gradient\(/.test(k.value)) ? 'gradient' : k.value;
+                      return (
+                        <div key={ki} className="tl-key" data-ti={ti} data-ki={ki}
+                          title={`${tlMeta(tr.prop).label} = ${shownVal} @ ${Math.round(k.t)}ms — drag to retime · click to edit · shift-click to multi-select`}
+                          onMouseDown={e => startKeyDrag(e, ti, ki, k)}
                           style={{ position: 'absolute', left: px(k.t) - 7, top: 9, width: 14, height: 14, transform: 'rotate(45deg)', cursor: 'ew-resize', zIndex: 2, borderRadius: 2,
-                            background: col || (active ? 'var(--blue-base)' : 'var(--text-secondary)'), border: '2px solid ' + (active ? 'var(--blue-base)' : col ? 'var(--border-strong)' : 'var(--border-strong)'),
+                            background: col || (active ? 'var(--blue-base)' : 'var(--text-secondary)'), border: '2px solid ' + (active ? 'var(--blue-base)' : 'var(--border-strong)'),
                             boxShadow: active ? '0 0 0 3px color-mix(in srgb, var(--blue-base) 30%, transparent)' : 'none' }} />
                       );
                     })}
                   </div>
-                ))}
+                  );
+                })}
+                {/* Rubber-band marquee overlay (content-coordinate space) */}
+                {marquee && (Math.abs(marquee.x1 - marquee.x0) > 1 || Math.abs(marquee.y1 - marquee.y0) > 1) && (
+                  <div style={{ position: 'absolute', left: Math.min(marquee.x0, marquee.x1), top: Math.min(marquee.y0, marquee.y1), width: Math.abs(marquee.x1 - marquee.x0), height: Math.abs(marquee.y1 - marquee.y0), border: '1px solid var(--blue-base)', background: 'color-mix(in srgb, var(--blue-base) 14%, transparent)', zIndex: 6, pointerEvents: 'none' }} />
+                )}
               </div>
             </div>
           </div>
 
-          {/* Selected-keyframe bar — full width, visible even when the sidebar is minimised */}
-          {selKey && (
+          {/* Keyframe edit bar — a multi-select summary with batch actions when >1 key is selected,
+              else the single-key editor. Full width so it works with the preview sidebar minimised. */}
+          {selKeys.length > 1 ? (
+            <div style={{ flex: 'none', display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', borderTop: '1px solid var(--border-default)', background: 'var(--surface-raised)' }}>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-secondary)' }}>
+                <i data-lucide="boxes" style={{ width: 13, height: 13 }}></i>{selKeys.length} keyframes selected
+              </span>
+              <span style={{ width: 1, height: 18, background: 'var(--border-subtle)' }} />
+              <label style={tlField} title="Set every selected keyframe to this exact time (aligns them all)">Time
+                {(() => {
+                  const ts = selKeys.map(s => (tracks[s.ti] && (tracks[s.ti].keys || [])[s.ki] || {}).t).filter(v => v != null);
+                  const allSame = ts.length > 0 && ts.every(t => t === ts[0]);
+                  const shown = allSame ? ts[0] : (ts.length ? Math.min(...ts) : 0); // mixed → show the earliest as the anchor
+                  return <TLScrub value={Math.round(shown)} min={0} max={Math.round(duration)} step={10}
+                    onChange={v => {
+                      const t = Math.max(0, Math.min(duration, Math.round(v)));
+                      if (onKeyCoalesce) onKeyCoalesce('kf-move');
+                      selKeys.forEach(s => { const kk = tracks[s.ti] && (tracks[s.ti].keys || [])[s.ki]; if (kk) onUpdateKey && onUpdateKey(s.ti, s.ki, { t }); });
+                    }} width={56} suffix="ms" />;
+                })()}
+              </label>
+              <label style={tlField}>Easing (all)
+                <select value="" onChange={e => { if (e.target.value) setSelEase(e.target.value); }} style={{ ...tlSelect, height: 26 }}>
+                  <option value="">Set…</option>
+                  {TL_EASES.map(e => <option key={e.v} value={e.v}>{e.label}</option>)}
+                </select>
+              </label>
+              <button type="button" onClick={doCopy} title="Copy (Ctrl/⌘ C)" style={tlBarBtn}><i data-lucide="copy" style={{ width: 13, height: 13 }}></i>Copy</button>
+              <button type="button" onClick={doDuplicate} title="Duplicate (Ctrl/⌘ D)" style={tlBarBtn}><i data-lucide="copy-plus" style={{ width: 13, height: 13 }}></i>Duplicate</button>
+              <button type="button" onClick={doDelete} title="Delete selected (⌫)" style={{ ...tlBarBtn, marginLeft: 'auto', borderColor: 'var(--status-danger-fg)', color: 'var(--status-danger-fg)' }}><i data-lucide="trash-2" style={{ width: 13, height: 13 }}></i>Delete</button>
+            </div>
+          ) : selKey ? (
             <div style={{ flex: 'none', display: 'flex', alignItems: 'center', gap: 12, padding: '8px 14px', borderTop: '1px solid var(--border-default)', background: 'var(--surface-raised)' }}>
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-muted)' }}>
                 <i data-lucide={tlMeta(selTrack.prop).icon} style={{ width: 13, height: 13 }}></i>{tlMeta(selTrack.prop).label}
@@ -457,7 +700,17 @@ function TimelineEditor(props) {
                   const type = tlType(selTrack.prop);
                   const setV = (v) => onUpdateKey(sel.ti, sel.ki, { value: v });
                   if (type === 'icon') return <div style={{ width: 200 }}><IconPicker value={selKey.value} onChange={setV} placeholder="Pick an icon" /></div>;
-                  if (type === 'color') return <div style={{ width: 200 }}><ColorField value={selKey.value} onChange={setV} palette={palette} /></div>;
+                  if (type === 'color') {
+                    // A Fill key can hold a gradient CSS string — ColorField only edits flat colours, so
+                    // show a read-only swatch and point back to the Appearance panel to re-shape it.
+                    if (typeof selKey.value === 'string' && /gradient\(/.test(selKey.value)) return (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: 200 }}>
+                        <div style={{ width: 26, height: 26, flex: 'none', borderRadius: 3, border: '1px solid var(--border-default)', background: selKey.value }} />
+                        <span style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.4 }}>Gradient — set the fill in Appearance, then re-key.</span>
+                      </div>
+                    );
+                    return <div style={{ width: 200 }}><ColorField value={selKey.value} onChange={setV} palette={palette} /></div>;
+                  }
                   if (type === 'text') return <input value={selKey.value == null ? '' : selKey.value} onChange={e => setV(e.target.value)} placeholder="Text…"
                     style={{ width: 200, height: 26, padding: '0 8px', border: '1px solid var(--border-subtle)', background: 'var(--surface-inset)', color: 'var(--text-primary)', fontSize: 12, fontFamily: 'var(--font-sans)', borderRadius: 3, outline: 'none', boxSizing: 'border-box' }} />;
                   if (type === 'select') return <select value={selKey.value} onChange={e => setV(e.target.value)} style={{ ...tlSelect, height: 26, minWidth: 110 }}>
@@ -474,11 +727,11 @@ function TimelineEditor(props) {
                   {TL_EASES.map(e => <option key={e.v} value={e.v}>{e.label}</option>)}
                 </select>
               </label>
-              <button type="button" onClick={() => { onDeleteKey(sel.ti, sel.ki); setSel(null); }} title="Delete keyframe (⌫)" style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 6, height: 26, padding: '0 10px', border: '1px solid var(--status-danger-fg)', background: 'transparent', color: 'var(--status-danger-fg)', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}>
+              <button type="button" onClick={() => { onDeleteKey(sel.ti, sel.ki); setSelKeys([]); }} title="Delete keyframe (⌫)" style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 6, height: 26, padding: '0 10px', border: '1px solid var(--status-danger-fg)', background: 'transparent', color: 'var(--status-danger-fg)', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}>
                 <i data-lucide="trash-2" style={{ width: 13, height: 13 }}></i>Delete
               </button>
             </div>
-          )}
+          ) : null}
         </div>
       </div>
 
@@ -495,6 +748,153 @@ function TimelineEditor(props) {
         const groups = TL_GROUP_ORDER.map(g => ({ name: g, icon: TL_GROUP_ICON[g], items: groupsMap[g] || [] })).filter(g => g.items.length);
         return <TLPicker q={pq} setQ={setPq} onClose={() => { setPicker(false); setPq(''); }} groups={groups} />;
       })()}
+
+      {presetOpen && presetsEnabled && presetsForSel.length > 0 && (
+        <TLPresetMenu presets={presetsForSel} propLabel={selProp ? tlMeta(selProp).label : ''}
+          onClose={() => setPresetOpen(false)}
+          onPick={(id) => { setPresetOpen(false); setPresetDlg({ presetId: id }); }} />
+      )}
+
+      {presetDlg && presetsEnabled && selTrackIdx != null && window.apPreset && window.buildPresetKeys && (() => {
+        const preset = window.apPreset(presetDlg.presetId);
+        if (!preset) return null;
+        return (
+          <TLPresetDialog
+            preset={preset} prop={selProp} category={selCat} base={selBaseVal}
+            propLabel={selProp ? tlMeta(selProp).label : ''} initialDuration={duration}
+            stageBW={stageBW} stageBH={stageBH}
+            buildKeys={(params, dur) => window.buildPresetKeys(preset.id, Object.assign({ prop: selProp, base: selBaseVal }, params), dur)}
+            renderPreview={previewPoseNode}
+            onCancel={() => setPresetDlg(null)}
+            onDone={(keys, opts) => { onApplyPresetToTrack(selTrackIdx, keys, opts); setPresetDlg(null); }} />
+        );
+      })()}
+    </div>
+  );
+}
+
+// Looping-motion picker, filtered to the selected track's property. Picking one opens TLPresetDialog
+// (live preview + adjustable knobs) rather than applying immediately.
+function TLPresetMenu(props) {
+  const presets = props.presets, onPick = props.onPick, onClose = props.onClose, propLabel = props.propLabel;
+  const ref = React.useRef(null);
+  React.useEffect(() => { if (window.renderLucideIcons) window.renderLucideIcons(); });
+  React.useEffect(() => {
+    const on = (e) => { if (ref.current && !ref.current.contains(e.target)) onClose(); };
+    const t = setTimeout(() => document.addEventListener('mousedown', on), 0);
+    return () => { clearTimeout(t); document.removeEventListener('mousedown', on); };
+  }, [onClose]);
+  return (
+    <div ref={ref} className="tl-pop" style={{ position: 'absolute', top: 46, right: 14, width: 300, maxHeight: 'calc(100% - 60px)', display: 'flex', flexDirection: 'column', background: 'var(--surface-raised)', border: '1px solid var(--border-default)', boxShadow: 'var(--shadow-overlay)', zIndex: 50 }}>
+      <div style={{ flex: 'none', display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderBottom: '1px solid var(--border-subtle)' }}>
+        <i data-lucide="sparkles" style={{ width: 14, height: 14, color: 'var(--text-muted)' }}></i>
+        <span style={{ flex: 1, fontSize: 12.5, fontWeight: 600, color: 'var(--text-primary)' }}>Presets{propLabel ? ' · ' + propLabel : ''}</span>
+        <button type="button" onClick={onClose} title="Close" style={tlBtn}><i data-lucide="x" style={tlIco}></i></button>
+      </div>
+      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 6 }}>
+        {presets.map(p => (
+          <button key={p.id} type="button" onClick={() => onPick(p.id)} className="tl-pickrow"
+            style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '8px 8px', border: 0, background: 'transparent', cursor: 'pointer', textAlign: 'left' }}>
+            <span style={{ display: 'inline-flex', width: 28, height: 28, flex: 'none', alignItems: 'center', justifyContent: 'center', border: '1px solid var(--border-subtle)', background: 'var(--surface-card)', color: 'var(--text-secondary)' }}><i data-lucide={p.icon} style={{ width: 14, height: 14 }}></i></span>
+            <span style={{ flex: 1, minWidth: 0 }}>
+              <span style={{ display: 'block', fontSize: 13, fontWeight: 500, color: 'var(--text-primary)' }}>{p.label}</span>
+              <span style={{ display: 'block', fontSize: 11.5, color: 'var(--text-muted)' }}>{p.hint}</span>
+            </span>
+            <i data-lucide="chevron-right" style={{ width: 15, height: 15, color: 'var(--text-muted)', flex: 'none' }}></i>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Preset config dialog: live looping preview of the node with the tentative motion on the selected
+// track, plus knobs (direction / amount / repeats / duration / easing). Done applies; Cancel discards.
+function TLPresetDialog(props) {
+  const { preset, category, propLabel, initialDuration, stageBW, stageBH, buildKeys, renderPreview, onDone, onCancel } = props;
+  const [params, setParams] = React.useState(() => Object.assign({ direction: 1, amount: 0, repeats: 1, easing: window.apEaseDefault ? window.apEaseDefault(preset.id) : 'ease-in-out' }, preset.defaults || {}));
+  const [dur, setDur] = React.useState(Math.max(50, Math.round(initialDuration || 1000)));
+  const [ph, setPh] = React.useState(0);
+  const set = (k) => (v) => setParams(p => Object.assign({}, p, { [k]: v }));
+  React.useEffect(() => { if (window.renderLucideIcons) window.renderLucideIcons(); });
+  // Local playback loop for the preview (independent of the main timeline transport).
+  React.useEffect(() => {
+    let raf, start = performance.now();
+    const loop = (now) => { setPh((now - start) % dur); raf = requestAnimationFrame(loop); };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [dur]);
+
+  const keys = buildKeys(params, dur);
+  const posed = renderPreview(keys, ph, dur);
+  const showParam = (name) => (preset.params || []).indexOf(name) !== -1;
+  // Direction labels depend on the motion's axis.
+  const dirLabels = category === 'position' ? ['Up', 'Down'] : ['Clockwise', 'Counter'];
+  const dirVals = category === 'position' ? [-1, 1] : [1, -1];
+
+  const seg = (active) => ({ flex: 1, height: 26, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 5, border: '1px solid var(--border-default)', background: active ? 'var(--action-solid)' : 'transparent', color: active ? 'var(--action-solid-text)' : 'var(--text-secondary)', fontSize: 12, fontWeight: 600, cursor: 'pointer', borderRadius: 3 });
+  const rowLabel = { fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-muted)', marginBottom: 5 };
+
+  return (
+    <div style={{ position: 'absolute', inset: 0, zIndex: 60, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.5)' }} onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel(); }}>
+      <div style={{ width: 620, maxWidth: 'calc(100% - 32px)', maxHeight: 'calc(100% - 32px)', display: 'flex', flexDirection: 'column', background: 'var(--surface-raised)', border: '1px solid var(--border-default)', boxShadow: 'var(--shadow-overlay)', borderRadius: 6, overflow: 'hidden' }}>
+        <div style={{ flex: 'none', display: 'flex', alignItems: 'center', gap: 9, padding: '11px 14px', borderBottom: '1px solid var(--border-subtle)' }}>
+          <i data-lucide={preset.icon} style={{ width: 16, height: 16, color: 'var(--action-solid)' }}></i>
+          <span style={{ flex: 1, fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>{preset.label} <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>· {propLabel}</span></span>
+          <button type="button" onClick={onCancel} title="Cancel" style={tlBtn}><i data-lucide="x" style={tlIco}></i></button>
+        </div>
+        <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
+          {/* Live preview */}
+          <div style={{ flex: 'none', width: 260, borderRight: '1px solid var(--border-subtle)', background: 'var(--bg-app)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 16, position: 'relative' }}>
+            <TLStage bw={stageBW} bh={stageBH}>{window.PreviewNode ? <PreviewNode node={posed} /> : null}</TLStage>
+            <div style={{ position: 'absolute', bottom: 8, fontSize: 10.5, color: 'var(--text-disabled)', fontFamily: 'var(--font-mono)' }}>looping preview</div>
+          </div>
+          {/* Controls */}
+          <div style={{ flex: 1, minWidth: 0, overflowY: 'auto', padding: 14, display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.5 }}>{preset.hint}. Adjust below — the preview updates live.</div>
+            {showParam('direction') && (
+              <div>
+                <div style={rowLabel}>Direction</div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  {dirLabels.map((lab, i) => (
+                    <button key={lab} type="button" onClick={() => set('direction')(dirVals[i])} style={seg((params.direction || 1) === dirVals[i])}>{lab}</button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {showParam('amount') && (
+              <div>
+                <div style={rowLabel}>{preset.amountLabel || 'Amount'}{preset.unit ? ' (' + preset.unit + ')' : ''}</div>
+                <input type="range" min={preset.min != null ? preset.min : 1} max={preset.max != null ? preset.max : 100} step={preset.step || 1}
+                  value={params.amount} onChange={e => set('amount')(+e.target.value)} style={{ width: '100%' }} />
+                <div style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{params.amount}{preset.unit || ''}</div>
+              </div>
+            )}
+            {showParam('repeats') && (
+              <div>
+                <div style={rowLabel}>Repeats per loop</div>
+                <input type="range" min={1} max={8} step={1} value={params.repeats} onChange={e => set('repeats')(+e.target.value)} style={{ width: '100%' }} />
+                <div style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{params.repeats}×</div>
+              </div>
+            )}
+            <div>
+              <div style={rowLabel}>Duration (ms)</div>
+              <input type="range" min={100} max={4000} step={50} value={dur} onChange={e => setDur(+e.target.value)} style={{ width: '100%' }} />
+              <div style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{dur} ms</div>
+            </div>
+            <div>
+              <div style={rowLabel}>Easing</div>
+              <select value={params.easing} onChange={e => set('easing')(e.target.value)} style={{ ...tlSelect, height: 28, width: '100%' }}>
+                {TL_EASES.map(o => <option key={o.v} value={o.v}>{o.label}</option>)}
+              </select>
+            </div>
+          </div>
+        </div>
+        <div style={{ flex: 'none', display: 'flex', justifyContent: 'flex-end', gap: 8, padding: '10px 14px', borderTop: '1px solid var(--border-subtle)' }}>
+          <button type="button" onClick={onCancel} style={{ height: 32, padding: '0 14px', border: '1px solid var(--border-default)', background: 'transparent', color: 'var(--text-secondary)', fontSize: 13, fontWeight: 600, borderRadius: 4, cursor: 'pointer' }}>Cancel</button>
+          <button type="button" onClick={() => onDone(buildKeys(params, dur), { duration: dur, loop: true, loopWrap: true })} style={{ height: 32, padding: '0 16px', border: '1px solid var(--action-solid)', background: 'var(--action-solid)', color: 'var(--action-solid-text)', fontSize: 13, fontWeight: 600, borderRadius: 4, cursor: 'pointer' }}>Done</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -590,6 +990,33 @@ function TLScrub(props) {
     <span onMouseDown={start} title="Drag to change · click to type" className="tl-scrub"
       style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 2, width, height: 24, padding: '0 6px', boxSizing: 'border-box', border: '1px solid var(--border-subtle)', background: 'var(--surface-inset)', color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', fontSize: 11.5, borderRadius: 3, cursor: 'ew-resize', userSelect: 'none' }}>
       {value}{suffix && <span style={{ color: 'var(--text-muted)' }}>{suffix}</span>}
+    </span>
+  );
+}
+
+// Current-frame time readout — "0.91s / 2.00s". The current-time half is click-to-type so you can jump
+// the playhead to an exact moment; dragging the ruler can't reliably land on a precise frame. Typed in
+// seconds (decimals ok, e.g. 1.25 → 1250ms); Enter/blur commits, Escape cancels, clamped to [0, duration].
+function TLTimeField({ playhead, duration, onSet, onBeginEdit }) {
+  const [editing, setEditing] = React.useState(false);
+  const [draft, setDraft] = React.useState('');
+  const fmt = (ms) => (ms / 1000).toFixed(2) + 's';
+  const begin = () => { onBeginEdit && onBeginEdit(); setDraft((playhead / 1000).toFixed(2)); setEditing(true); };
+  const commit = () => {
+    let s = parseFloat(draft); if (isNaN(s)) s = playhead / 1000;
+    onSet(Math.min(duration, Math.max(0, Math.round(s * 1000)))); setEditing(false);
+  };
+  return (
+    <span style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', minWidth: 92, display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+      {editing ? (
+        <input autoFocus type="number" step="0.01" value={draft} onChange={e => setDraft(e.target.value)} onBlur={commit}
+          onKeyDown={e => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') setEditing(false); }}
+          style={{ width: 48, height: 20, padding: '0 4px', border: '1px solid var(--border-focus)', background: 'var(--surface-inset)', color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', fontSize: 11, outline: 'none', borderRadius: 3, boxSizing: 'border-box', MozAppearance: 'textfield' }} />
+      ) : (
+        <span onClick={begin} className="tl-timeedit" title="Click to type an exact time in seconds (e.g. 1.25)"
+          style={{ cursor: 'text', color: 'var(--text-secondary)' }}>{fmt(playhead)}</span>
+      )}
+      <span>/ {fmt(duration)}</span>
     </span>
   );
 }
@@ -695,7 +1122,12 @@ function TLStyles() {
       .tl-lane:hover { background: color-mix(in srgb, var(--surface-hover) 40%, transparent); }
       .tl-key { transition: transform var(--dur-fast) var(--ease-out); }
       .tl-key:hover { transform: rotate(45deg) scale(1.18); }
+      /* Per-segment easing pills stay out of the way until you hover the lane (or the pill itself). */
+      .tl-ease { opacity: 0; transition: opacity var(--dur-fast) var(--ease-out); }
+      .tl-lane:hover .tl-ease { opacity: 0.85; }
+      .tl-ease:hover { opacity: 1; border-color: var(--border-strong); color: var(--text-primary); }
       .tl-scrub:hover { border-color: var(--border-strong); color: var(--text-primary); }
+      .tl-timeedit:hover { color: var(--text-primary); text-decoration: underline dotted; }
       .tl-pickrow:not(:disabled):hover { background: var(--surface-hover); }
       .tl-pop { animation: tlPop var(--dur-base) var(--ease-out) both; }
       @keyframes tlPop { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
@@ -707,8 +1139,8 @@ const tlBtn = { width: 24, height: 22, border: 0, borderRadius: 4, background: '
 const tlIco = { width: 13, height: 13 };
 const tlField = { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--text-muted)' };
 const tlSelect = { height: 22, padding: '0 6px', border: '1px solid var(--border-subtle)', borderRadius: 3, background: 'var(--surface-inset)', color: 'var(--text-secondary)', fontSize: 11.5, outline: 'none', cursor: 'pointer', fontFamily: 'var(--font-sans)' };
-const tlHint = { display: 'inline-flex', alignItems: 'center', gap: 5, flex: 'none' };
-const tlHintKey = { color: 'var(--text-secondary)', fontWeight: 600 };
+// Labelled action button in the multi-select keyframe bar (Copy / Duplicate / Delete).
+const tlBarBtn = { display: 'inline-flex', alignItems: 'center', gap: 6, height: 26, padding: '0 10px', border: '1px solid var(--border-subtle)', background: 'transparent', color: 'var(--text-secondary)', borderRadius: 4, cursor: 'pointer', fontSize: 12 };
 // One half of the Component|Page scope switch. `on` = this scope is being authored.
 const tlSeg = (on, disabled) => ({
   display: 'inline-flex', alignItems: 'center', gap: 5, height: 22, padding: '0 9px', border: 0,

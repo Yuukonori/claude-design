@@ -41,7 +41,7 @@ const pageCloseStyle = (show) => ({
 });
 const pageAddStyle = { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 33, flex: 'none', border: 0, borderRight: '1px solid var(--border-subtle)', background: 'transparent', color: 'var(--text-muted)', cursor: 'pointer' };
 
-function Topbar({ view, setView, pageName, projectName, saving, onBack, onHelp, previewMode, onTogglePreview, onRun, device, onSetDevice, responsive = true, desktopPreset, onSetDesktopPreset, artboard, orientation, onToggleOrientation, customSize, onSetCustomSize, onOpenSettings, onShare, onGenerate, dirty, onUndo, onRedo, canUndo, canRedo }) {
+function Topbar({ view, setView, pageName, projectName, saving, onBack, onHelp, previewMode, onTogglePreview, onRun, runState, onStop, onRestart, onPause, device, onSetDevice, responsive = true, desktopPreset, onSetDesktopPreset, artboard, orientation, onToggleOrientation, customSize, onSetCustomSize, onOpenSettings, onShare, onGenerate, dirty, onUndo, onRedo, canUndo, canRedo }) {
   const DESKTOP_PRESETS = window.DESKTOP_PRESETS || [];
   const { IconButton, Tabs, Button, Tooltip } = window.LatticeDesignSystem_e801cb;
   // Progressive breakpoints — shed breadcrumb/readout chrome so the view tabs never collide.
@@ -148,10 +148,32 @@ function Topbar({ view, setView, pageName, projectName, saving, onBack, onHelp, 
             </Button>
           </Tooltip>
         )}
-        {onRun && (
-          <Tooltip label="Run the app live in a new tab">
-            <Button variant="outline" size="sm" onClick={onRun} iconLeft={<i data-lucide="rocket"></i>}>{tight ? '' : 'Run'}</Button>
-          </Tooltip>
+        {onRun && !(runState && runState.active) && (
+          <>
+            <Tooltip label="Debug run — opens the app + a console window (logs, network, build errors)">
+              <Button variant="outline" size="sm" onClick={() => onRun(true)} iconLeft={<i data-lucide="bug-play"></i>}>{tight ? '' : 'Debug'}</Button>
+            </Tooltip>
+            <Tooltip label="Run — launches the compiled app in a popup window (release)">
+              <Button variant="outline" size="sm" onClick={() => onRun(false)} iconLeft={<i data-lucide="rocket"></i>}>{tight ? '' : 'Run'}</Button>
+            </Tooltip>
+            <Tooltip label="Web — standalone render: just the page, no device toolbar (follows the window like a real site)">
+              <Button variant="outline" size="sm" onClick={() => onRun(false, { standalone: true })} iconLeft={<i data-lucide="globe"></i>}>{tight ? '' : 'Web'}</Button>
+            </Tooltip>
+          </>
+        )}
+        {onRun && runState && runState.active && (
+          <>
+            <Tooltip label="Stop the running app">
+              <Button variant="danger" size="sm" onClick={onStop} iconLeft={<i data-lucide="square"></i>}>{tight ? '' : 'Stop'}</Button>
+            </Tooltip>
+            <Tooltip label="Restart — re-compile and reload the run">
+              <IconButton title="Restart" onClick={onRestart}><i data-lucide="rotate-ccw"></i></IconButton>
+            </Tooltip>
+            <Tooltip label={runState.paused ? 'Resume' : 'Pause (freeze animation)'}>
+              <IconButton title={runState.paused ? 'Resume' : 'Pause'} onClick={onPause}><i data-lucide={runState.paused ? 'play' : 'pause'}></i></IconButton>
+            </Tooltip>
+            {runState.debug && <span style={{ fontSize: 11, color: 'var(--amber-base)', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 4 }}><i data-lucide="bug" style={{ width: 12, height: 12 }}></i>{tight ? '' : 'Debug'}</span>}
+          </>
         )}
         <Tooltip label="Keyboard shortcuts (?)">
           <IconButton title="Shortcuts" onClick={onHelp}><i data-lucide="keyboard"></i></IconButton>
@@ -181,7 +203,7 @@ window.Topbar = Topbar;
 
 // VS Code-style page tabs — rendered above the canvas column only (not across the side panels).
 // Also hosts transient "animation editor" tabs (film icon) that open beside the page tabs.
-function PageTabs({ pages = [], activePageId, onSelectPage, onAddPage, onRenamePage, onDeletePage, animTabs = [], activeAnimId, onSelectAnim, onCloseAnim, onTearTab }) {
+function PageTabs({ pages = [], activePageId, onSelectPage, onAddPage, onRenamePage, onDeletePage, animTabs = [], activeAnimId, onSelectAnim, onCloseAnim }) {
   const { Tooltip } = window.LatticeDesignSystem_e801cb;
   const [editId, setEditId] = React.useState(null);
   const [draft, setDraft] = React.useState('');
@@ -200,7 +222,6 @@ function PageTabs({ pages = [], activePageId, onSelectPage, onAddPage, onRenameP
           const showClose = pages.length > 1 && (active || hovered) && !editing;
           return (
             <div key={p.id}
-              onMouseDown={e => { if (!editing && onTearTab) onTearTab({ type: 'page', pageId: p.id }, e); }}
               onClick={() => { if (!editing) onSelectPage(p.id); }}
               onDoubleClick={() => { if (onRenamePage) { setEditId(p.id); setDraft(p.name); } }}
               onMouseEnter={() => setHoverId(p.id)}
@@ -231,7 +252,6 @@ function PageTabs({ pages = [], activePageId, onSelectPage, onAddPage, onRenameP
           const hovered = hoverId === t.id;
           return (
             <div key={t.id}
-              onMouseDown={e => { if (onTearTab) onTearTab({ type: 'anim', animTabId: t.id }, e); }}
               onClick={() => onSelectAnim && onSelectAnim(t.id)}
               onMouseEnter={() => setHoverId(t.id)}
               onMouseLeave={() => setHoverId(h => (h === t.id ? null : h))}

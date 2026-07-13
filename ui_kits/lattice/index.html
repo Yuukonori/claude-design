@@ -47,7 +47,10 @@ window.renderLucideIcons = function (root) {
   }
 };
 </script>
-<style>html,body{margin:0;height:100%;background:var(--bg-app)}
+<style>html,body{margin:0;height:100%;background:var(--bg-app);color-scheme:dark}
+/* Native scrollbars in the editor chrome render dark (via color-scheme); belt-and-suspenders so the
+   corner where a panel's vertical + horizontal scrollbars meet never falls back to a white square. */
+::-webkit-scrollbar-corner{background:transparent}
 input[type=number]{-moz-appearance:textfield;appearance:textfield;cursor:ew-resize}
 input[type=number]:focus{cursor:text}
 input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
@@ -123,6 +126,7 @@ input[type=password]::-ms-reveal,input[type=password]::-ms-clear{display:none!im
 <script type="text/babel" src="ColorField.jsx" data-presets="react"></script>
 <script type="text/babel" src="NodeStyle.jsx" data-presets="react"></script>
 <script type="text/babel" src="AnimEngine.jsx" data-presets="react"></script>
+<script type="text/babel" src="AnimPresets.jsx" data-presets="react"></script>
 <script type="text/babel" src="ShaderFill.jsx" data-presets="react"></script>
 <script type="text/babel" src="WorkflowEngine.jsx" data-presets="react"></script>
 <script type="text/babel" src="InspectorExtras.jsx" data-presets="react"></script>
@@ -134,12 +138,12 @@ input[type=password]::-ms-reveal,input[type=password]::-ms-clear{display:none!im
 <script type="text/babel" src="PreviewCanvas.jsx" data-presets="react"></script>
 <script type="text/babel" src="Inspector.jsx" data-presets="react"></script>
 <script type="text/babel" src="CodePanel.jsx" data-presets="react"></script>
+<script type="text/babel" src="RunEngine.jsx" data-presets="react"></script>
 <script type="text/babel" src="RelationshipsView.jsx" data-presets="react"></script>
 <script type="text/babel" src="WorkflowView.jsx" data-presets="react"></script>
 <script type="text/babel" src="WorkflowRunLog.jsx" data-presets="react"></script>
 <script type="text/babel" src="AnimCanvas.jsx" data-presets="react"></script>
 <script type="text/babel" src="TimelineEditor.jsx" data-presets="react"></script>
-<script type="text/babel" src="PreviewDock.jsx" data-presets="react"></script>
 <script type="text/babel" src="App.jsx" data-presets="react"></script>
 <script type="text/babel" data-presets="react">
   // Surfaces any uncaught render error as on-screen text instead of a blank near-black page.

@@ -57,8 +57,14 @@ function ShadowedText({ node, type, shadowType, children }) {
 // Every canvas/preview icon goes through here so size, colour, stroke, rotation, flip and opacity
 // all work (see the `[data-lt-icon]` rules in index.html).
 function LIcon({ name, ...o }) {
+  // The glyph SVG is injected into this <i> by a post-render DOM scan, not by React. When the node
+  // re-renders in Preview (e.g. a hover/click interaction state changes its colour or scale), React
+  // can recreate the <i> empty — so re-run the scan on every render, or the icon vanishes after the
+  // first interaction and never comes back. Mirrors InputField's adornment re-scan.
+  const ref = React.useRef(null);
+  React.useEffect(() => { if (window.renderLucideIcons && ref.current) window.renderLucideIcons(ref.current.parentNode || undefined); });
   if (!name) return null;
-  return <i data-lt-icon data-lucide={name} style={window.iconStyle ? window.iconStyle(o) : { width: o.size, height: o.size }}></i>;
+  return <i ref={ref} data-lt-icon data-lucide={name} style={window.iconStyle ? window.iconStyle(o) : { width: o.size, height: o.size }}></i>;
 }
 
 // Resolve any icon slot to an element, priority: pasted SVG > image/asset > Lucide glyph. `o` carries
@@ -344,9 +350,13 @@ function pvRender(node) {
   if (kind === 'image') {
     // Resolve an internal asset path (e.g. "src/assets/logo.png") to its data URL; URLs pass through.
     const imgSrc = window.resolveAssetSrc ? window.resolveAssetSrc(node.src) : node.src;
+    // Border / radius / shadow / opacity / transform all come from the node's own settings (nodeFx), so
+    // turning Border off actually removes it — no baked-in frame. (Was hardcoding a 1px border here.)
+    const fx = (window.nodeFx && window.nodeFx(node)) || {};
     return imgSrc
-      ? <img src={imgSrc} alt={node.label || ''} style={{ ...box, objectFit: node.fit || 'cover', borderRadius: node.radius || 0, border: '1px solid var(--border-subtle)' }} />
-      : <div style={{ ...box, background: fill || 'var(--surface-card)', border: '1px solid var(--border-subtle)', borderRadius: node.radius || 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-disabled)' }}><i data-lucide="image" style={{ width: 24, height: 24 }}></i></div>;
+      ? <img src={imgSrc} alt={node.label || ''} style={{ ...box, objectFit: node.fit || 'cover', ...fx }} />
+      // Empty slot: keep a dashed hint frame at design time (unless the node sets its own border).
+      : <div style={{ ...box, background: fill || 'var(--surface-card)', ...fx, border: fx.border || '1px dashed var(--border-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-disabled)' }}><i data-lucide="image" style={{ width: 24, height: 24 }}></i></div>;
   }
   if (kind === 'divider') {
     const t = node.thickness || 1;
@@ -678,6 +688,15 @@ function PreviewCanvas({ nodes, connections, artboard, device, onAction, runtime
     return 'default';
   };
   const activeTrigger = (n) => { const pl = pulse[n.id]; if (pl && usable(n, pl.key)) return pl.key; return sustainedTrigger(n); };
+  // A menu (nav group) opens with its marked item already active — seed that into the sticky-toggle
+  // map. Keyed on the nav props only (not on clicks), so it sets the default once without ever
+  // fighting the user's own selection afterwards.
+  const navSig = nodes.map(n => (n.navGroup ? n.id + '=' + n.navGroup + (n.navActive ? '*' : '') : '')).join('|');
+  React.useEffect(() => {
+    const seed = {};
+    nodes.forEach(n => { if (n.navGroup && n.navActive) seed[n.id] = true; });
+    if (Object.keys(seed).length) setToggled(t => { const nt = { ...t }; let ch = false; for (const id in seed) if (!nt[id]) { nt[id] = true; ch = true; } return ch ? nt : t; });
+  }, [navSig]); // eslint-disable-line react-hooks/exhaustive-deps
   // Start the clock for a sustained trigger's bound animation (hold freezes on its last key).
   const startTriggerAnim = (n, key) => {
     const stt = animOf(n, key);
@@ -730,11 +749,12 @@ function PreviewCanvas({ nodes, connections, artboard, device, onAction, runtime
     }
     return { key: 'default', animing: false, rendered: n };
   };
-  // A looping, enabled, track-based animation that isn't bound to any trigger auto-plays as "idle"
-  // (e.g. a loading spinner). Frame-based legacy loops keep using the animState() path above.
+  // A track-based animation the user explicitly marked "Play on load" auto-plays as the resting/idle
+  // state (e.g. a loading spinner), as long as it isn't already bound to a trigger. Autoplay is opt-in:
+  // enabling a state no longer makes it play — Enable/disable only governs trigger + workflow-node use.
   const idleAnimOf = (n) => {
     const bound = new Set(Object.values(n.states || {}).map(s => s && s.animId).filter(Boolean));
-    return (n.customStates || []).find(c => (c.type || 'static') === 'anim' && c.loop && (c.tracks && c.tracks.length) && !bound.has(c.id) && (!window.stateEnabled || window.stateEnabled(n, c.id)));
+    return (n.customStates || []).find(c => (c.type || 'static') === 'anim' && c.autoplay && (c.tracks && c.tracks.length) && !bound.has(c.id));
   };
   const idleSig = nodes.map(n => { const c = idleAnimOf(n); return c ? n.id + ':' + c.id + ':' + (window.stateDuration ? window.stateDuration(c) : 0) : ''; }).join('|');
   React.useEffect(() => {
@@ -764,8 +784,9 @@ function PreviewCanvas({ nodes, connections, artboard, device, onAction, runtime
     return () => { if (sceneRafRef.current) cancelAnimationFrame(sceneRafRef.current); };
   }, [sceneSig]); // eslint-disable-line
   // Overrides for one node from the scene timeline at the current scene time (or null).
-  const sceneOvOf = (n) => sceneTL ? window.sampleTracks((sceneTL.tracks || []).filter(tr => tr.nodeId === n.id), sceneTimeRef.current) : null;
-  const applyScene = (n) => { const ov = sceneTL ? sceneOvOf(n) : null; return ov && Object.keys(ov).length ? { ...n, ...ov } : n; };
+  const sceneWrapOpts = sceneTL && sceneTL.loop !== false ? { wrap: sceneTL.loopWrap !== false, duration: sceneDur } : null;
+  const sceneOvOf = (n) => sceneTL ? window.sampleTracks((sceneTL.tracks || []).filter(tr => tr.nodeId === n.id), sceneTimeRef.current, sceneWrapOpts) : null;
+  const applyScene = (n) => { const ov = sceneTL ? sceneOvOf(n) : null; return ov && Object.keys(ov).length ? (window.applyPose ? window.applyPose(n, ov) : { ...n, ...ov }) : n; };
 
   const dispatch = (action) => {
     if (!action) return;
@@ -899,7 +920,14 @@ function PreviewCanvas({ nodes, connections, artboard, device, onAction, runtime
               stopClock(n.id);
             };
             const onClick = (e) => {
-              if (hasStates) { if (toggleMode) setToggled(t => ({ ...t, [n.id]: !t[n.id] })); else firePulse(n, 'click'); }
+              if (hasStates) {
+                if (toggleMode) {
+                  // A menu item (nav group) is single-active: activate this one, clear its group-mates.
+                  // A plain toggle just flips itself.
+                  if (n.navGroup) setToggled(t => { const nt = { ...t }; nodes.forEach(m => { if (m.navGroup === n.navGroup) nt[m.id] = m.id === n.id; }); return nt; });
+                  else setToggled(t => ({ ...t, [n.id]: !t[n.id] }));
+                } else firePulse(n, 'click');
+              }
               run(n, 'click')(e);
             };
             const onCtx = (e) => { if (hasStates && usable(n, 'rightClick')) { e.preventDefault(); firePulse(n, 'rightClick'); } };

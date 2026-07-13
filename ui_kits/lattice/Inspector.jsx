@@ -15,9 +15,36 @@ const SHAPE = new Set(['rect', 'ellipse', 'line', 'triangle', 'star', 'polygon',
 const BORDER_INTRINSIC = new Set(['input', 'textarea']);
 window.kindOf = kindOf;
 
-function Inspector({ node, onChange, onBaseChange, onRename, connections, onDelete, onDetach, onDuplicate, allNodes = [], onSetParent, responsive = true, palette = [], pages = [], workflows = [], variables = [], pageVars = [], editingState = 'default', onSetEditingState, singleSelected = true, onResetState, editingFrame = null, onSetEditingFrame, onAddCustomState, onUpdateCustomState, onDeleteCustomState, onAddFrame, onUpdateFrame, onDeleteFrame, frameEditing = false, onOpenAnimEditor, onApplyPreset, onBindAnim, onSaveAsComponent, onEditShader, shaderPresets, width, assets = [], onAddAsset }) {
+// Field-accessory context (see Inspector). Null-safe: components read it and no-op when absent.
+const InspCtx = React.createContext(null);
+// Panel-UI context: drives the header search box (filters Sections) and the collapse/expand-all button.
+const InspUI = React.createContext(null);
+// Per-Section context: descendant ◆ KeyBtns register their (prop → live value) here so the section
+// header's "keyframe all" can drop a key on every animatable field in the group in one click.
+const SectionKeyCtx = React.createContext(null);
+
+function Inspector({ node, onChange, onBaseChange, onRename, connections, onDelete, onDetach, onDuplicate, allNodes = [], onSetParent, responsive = true, palette = [], pages = [], workflows = [], variables = [], pageVars = [], editingState = 'default', onSetEditingState, singleSelected = true, onResetState, onSetStateEnabled, editingFrame = null, onSetEditingFrame, onAddCustomState, onUpdateCustomState, onDeleteCustomState, onAddFrame, onUpdateFrame, onDeleteFrame, frameEditing = false, animEditing = '', onOpenAnimEditor, onApplyPreset, onBindAnim, onSaveAsComponent, onEditShader, shaderPresets, width, assets = [], onAddAsset, animActive = false, animTrackedProps = [], onKeyframeProp }) {
   const SHADERS = shaderPresets || window.SHADER_PRESETS || { plasma: '' };
   const { Select, Switch, Tag, Badge, Button, Input } = window.LatticeDesignSystem_e801cb;
+  // Field-accessory context: powers the per-field ◆ keyframe button (while a timeline is open) and the
+  // ⚡ "insert variable" button (whenever local/global variables exist). Provided once, read by NumRow /
+  // CRow and the bespoke rows below so every value field can opt in with a `prop` / bind handler.
+  const bindVars = [
+    ...(variables || []).map(v => ({ id: v.id, name: v.name, scope: 'Global' })),
+    ...(pageVars || []).map(v => ({ id: v.id, name: v.name, scope: 'Page' })),
+  ];
+  const inspCtx = {
+    animActive: !!animActive,
+    tracked: new Set(animTrackedProps || []),
+    onKeyframe: onKeyframeProp,
+    vars: bindVars,
+  };
+  // Header search + collapse-all state. `collapseSig` bumps `n` on each collapse/expand-all click so
+  // every Section can react once (see Section). Kept above the early return so hook order is stable.
+  const [inspQuery, setInspQuery] = React.useState('');
+  const [inspAllCollapsed, setInspAllCollapsed] = React.useState(false);
+  const [inspCollapseSig, setInspCollapseSig] = React.useState({ open: true, n: 0 });
+  const inspUI = { query: inspQuery, collapseSig: inspCollapseSig };
 
   if (!node) {
     return (
@@ -37,6 +64,10 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
   // input-like kinds have a border by default → "on" unless explicitly disabled (borderWidth === 0)
   const borderOn = BORDER_INTRINSIC.has(kindOf(node)) ? node.borderWidth !== 0 : (node.borderWidth || 0) > 0;
   const isTextKind = !!(window.TEXT_KINDS && window.TEXT_KINDS.has(kind));
+  // While a component timeline is open (`animEditing` = the animation's name), the panel edits that
+  // animation's own values, so the interaction-state dropdown and node-level sections are hidden in
+  // favour of a clear banner — otherwise the anim state's values would read as if they were "Default".
+  const showNodeSections = editingState === 'default' && !animEditing;
   const rel = connections.filter(c => c.from === node.id || c.to === node.id);
   const set = (k) => (v) => onChange(node.id, { [k]: v });
   const setNum = (k, min) => (v) => onChange(node.id, { [k]: Math.max(min ?? -99999, +v || 0) });
@@ -72,7 +103,12 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
   const iconCustomSource = (srcKey, svgKey) => (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border-subtle)' }}>
       <div style={fieldCap}>Custom source (optional)</div>
-      <Input label="Image (URL or asset path)" size="sm" placeholder="https://… or src/assets/…" value={node[srcKey] || ''} onChange={e => set(srcKey)(e.target.value)} />
+      <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <Input label="Image (URL or asset path)" size="sm" placeholder="https://… or src/assets/…" value={node[srcKey] || ''} onChange={e => set(srcKey)(e.target.value)} />
+        </div>
+        <BindMenu onPick={v => set(srcKey)((node[srcKey] || '') + '{{' + v.name + '}}')} />
+      </div>
       {renderImgSource(srcKey)}
       <div>
         <div style={fieldCap}>Paste SVG code</div>
@@ -92,6 +128,15 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
   const setW = (v) => { const w = Math.max(12, +v || 12); if (node.lockAspect) onChange(node.id, { w, h: Math.max(8, Math.round(w / ratio)) }); else set('w')(w); };
   const setH = (v) => { const h = Math.max(8, +v || 8); if (node.lockAspect) onChange(node.id, { w: Math.max(12, Math.round(h * ratio)), h }); else set('h')(h); };
   const chartStr = (v) => Array.isArray(v) ? v.join(', ') : (v || '');
+  // A text field carrying the ⚡ insert-variable affordance (appends {{name}} to the current value).
+  const bindText = (labelText, key, extra = {}) => (
+    <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6 }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <Input label={labelText} size="sm" value={node[key] || ''} onChange={e => set(key)(e.target.value)} {...extra} />
+      </div>
+      <BindMenu onPick={v => set(key)((node[key] || '') + '{{' + v.name + '}}')} />
+    </div>
+  );
 
   const currentParentConn = connections.find(c => c.to === node.id && c.kind === 'child');
   const currentParentId = currentParentConn?.from || null;
@@ -99,12 +144,36 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
   const otherNodes = allNodes.filter(n => n.id !== node.id);
 
   return (
+    <InspCtx.Provider value={inspCtx}>
+    <InspUI.Provider value={inspUI}>
     <aside key={node.id} style={{ ...inspAside, width: width || inspAside.width }}>
       <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', gap: 8 }}>
         <i data-lucide={node.icon} style={{ width: 15, height: 15, color: 'var(--text-secondary)' }}></i>
         <span style={{ flex: 1, fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{node.name}</span>
         <span style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>{kind}</span>
         <Badge tone={node.synced ? 'success' : 'warning'}>{node.synced ? 'Synced' : 'Modified'}</Badge>
+      </div>
+
+      {/* Toolbar: search filters the property Sections; the button collapses/expands them all at once. */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 10px', borderBottom: '1px solid var(--border-subtle)' }}>
+        <div style={{ position: 'relative', flex: 1, minWidth: 0 }}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ position: 'absolute', left: 7, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-disabled)', pointerEvents: 'none' }}><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></svg>
+          <input value={inspQuery} onChange={e => setInspQuery(e.target.value)} placeholder="Search properties…" spellCheck={false}
+            style={{ width: '100%', height: 26, padding: '0 22px 0 24px', boxSizing: 'border-box', border: '1px solid var(--border-subtle)', background: 'var(--surface-inset)', color: 'var(--text-primary)', fontSize: 12, borderRadius: 4, outline: 'none' }} />
+          {inspQuery && (
+            <button type="button" title="Clear search" onClick={() => setInspQuery('')}
+              style={{ position: 'absolute', right: 3, top: '50%', transform: 'translateY(-50%)', border: 0, background: 'transparent', color: 'var(--text-muted)', cursor: 'pointer', padding: '2px 4px', display: 'flex', lineHeight: 1, fontSize: 14 }}>×</button>
+          )}
+        </div>
+        <button type="button" title={inspAllCollapsed ? 'Expand all sections' : 'Collapse all sections'}
+          onClick={() => { const open = inspAllCollapsed; setInspAllCollapsed(!inspAllCollapsed); setInspCollapseSig(s => ({ open, n: s.n + 1 })); }}
+          style={{ flex: 'none', width: 26, height: 26, display: 'grid', placeItems: 'center', border: '1px solid var(--border-subtle)', background: 'var(--surface-inset)', color: 'var(--text-muted)', cursor: 'pointer', borderRadius: 4 }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            {inspAllCollapsed
+              ? <><polyline points="7 10 12 5 17 10" /><polyline points="7 14 12 19 17 14" /></>
+              : <><polyline points="7 5 12 10 17 5" /><polyline points="7 19 12 14 17 19" /></>}
+          </svg>
+        </button>
       </div>
 
       <div style={{ padding: '14px 14px', display: 'flex', flexDirection: 'column', gap: 20, overflow: 'auto', flex: 1, minHeight: 0 }}>
@@ -116,7 +185,14 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
           </div>
         )}
 
-        {!frameEditing && singleSelected && onSetEditingState && (() => {
+        {animEditing && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', border: '1px solid var(--blue-base)', borderRadius: 4, background: 'var(--blue-base)18', fontSize: 11.5, color: 'var(--text-secondary)' }}>
+            <i data-lucide="film" style={{ width: 14, height: 14, color: 'var(--blue-base)', flex: 'none' }}></i>
+            <span>Editing animation <b style={{ color: 'var(--text-primary)' }}>{animEditing}</b> — values below shape this animation only, not Default.</span>
+          </div>
+        )}
+
+        {!animEditing && !frameEditing && singleSelected && onSetEditingState && (() => {
           const LABELS = window.STATE_LABELS || { default: 'Default' };
           const KEYS = window.STATE_KEYS || [];
           const customs = node.customStates || [];
@@ -146,7 +222,8 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
                   {custom && <Input label="State name" size="sm" value={custom.name} onChange={e => onUpdateCustomState && onUpdateCustomState(custom.id, { name: e.target.value })} />}
                   {custom && <Select label="Type" size="sm" options={[{ value: 'static', label: 'Static' }, { value: 'anim', label: 'Animation' }]}
                     value={custom.type || 'static'} onChange={e => onUpdateCustomState && onUpdateCustomState(custom.id, { type: e.target.value })} />}
-                  <Switch label={`Enable ${nameOf(editingState)}`} checked={enabled} onChange={on => onChange(node.id, { off: !on })} />
+                  <Switch label={`Enable ${nameOf(editingState)}`} checked={enabled}
+                    onChange={on => onSetStateEnabled ? onSetStateEnabled(node.id, editingState, on) : onChange(node.id, { off: !on })} />
 
                   {/* Built-in trigger: pick a Static variant or an assigned Animation. */}
                   {isBuiltin && (
@@ -194,7 +271,8 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
                   {custom && custom.type === 'anim' && (
                     <>
                       <Switch label="Loop" checked={!!custom.loop} onChange={on => onUpdateCustomState(custom.id, { loop: on })} />
-                      <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Author per-property keyframes on a timeline. Assign this animation to a trigger above, or tear it off to preview in the dock.</div>
+                      <Switch label="Play on load (default)" checked={!!custom.autoplay} onChange={on => onUpdateCustomState(custom.id, { autoplay: on })} />
+                      <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Author per-property keyframes on a timeline. Play it by assigning it to a trigger above or a workflow node — or turn on <b>Play on load</b> to make it the resting animation. <b>Enable</b> only controls whether workflow nodes can pick it.</div>
                       <Button variant="solid" size="sm" fullWidth iconLeft={<i data-lucide="film"></i>} onClick={() => onOpenAnimEditor && onOpenAnimEditor(custom.id)}>
                         Open timeline editor{kfCount(custom) ? ` (${kfCount(custom)} key${kfCount(custom) === 1 ? '' : 's'})` : ''}
                       </Button>
@@ -219,8 +297,14 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             <Input label="Name" size="sm" value={node.name} onChange={e => onRename(node.id, e.target.value)} />
             {!NO_TEXT.has(kind) && (
-              <Input label={kind === 'input' ? 'Label' : 'Text'} size="sm" value={node.label || ''} placeholder="Displayed text"
-                onChange={e => onChange(node.id, { label: e.target.value })} />
+              <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <Input label={kind === 'input' ? 'Label' : 'Text'} size="sm" value={node.label || ''} placeholder="Displayed text"
+                    onChange={e => onChange(node.id, { label: e.target.value })} />
+                </div>
+                <BindMenu onPick={v => onChange(node.id, { label: (node.label || '') + '{{' + v.name + '}}' })} />
+                {animActive && <KeyBtn prop="label" value={node.label || ''} />}
+              </div>
             )}
           </div>
         </Section>
@@ -229,13 +313,13 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div style={{ display: 'grid', gridTemplateColumns: '14px 1fr 14px 1fr', columnGap: 6, rowGap: 6, alignItems: 'center' }}>
               <FieldLabel>W</FieldLabel>
-              <input title="Width" type="number" value={node.w} min={12} onChange={e => setW(e.target.value)} style={numIn} />
+              <DimIn title="Width" prop="w" value={node.w} min={12} onChange={e => setW(e.target.value)} />
               <FieldLabel>H</FieldLabel>
-              <input title="Height" type="number" value={node.h} min={8} onChange={e => setH(e.target.value)} style={numIn} />
+              <DimIn title="Height" prop="h" value={node.h} min={8} onChange={e => setH(e.target.value)} />
               <FieldLabel>X</FieldLabel>
-              <input title="X position" type="number" value={node.x} onChange={e => set('x')(+e.target.value || 0)} style={numIn} />
+              <DimIn title="X position" prop="x" value={node.x} onChange={e => set('x')(+e.target.value || 0)} />
               <FieldLabel>Y</FieldLabel>
-              <input title="Y position" type="number" value={node.y} onChange={e => set('y')(+e.target.value || 0)} style={numIn} />
+              <DimIn title="Y position" prop="y" value={node.y} onChange={e => set('y')(+e.target.value || 0)} />
             </div>
             <Switch label="Lock aspect ratio" checked={!!node.lockAspect} onChange={set('lockAspect')} />
           </div>
@@ -243,10 +327,10 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
 
         <Section title="Transform">
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <NumRow label="Scale %" value={node.scale ?? 100} min={1} onChange={v => set('scale')(Math.max(1, Math.min(1000, +v || 100)))} />
-            <NumRow label="Rotation °" value={node.rotation ?? 0} min={-360} onChange={v => set('rotation')(+v || 0)} />
-            <NumRow label="Skew X °" value={node.skewX ?? 0} min={-89} onChange={v => set('skewX')(Math.max(-89, Math.min(89, +v || 0)))} />
-            <NumRow label="Skew Y °" value={node.skewY ?? 0} min={-89} onChange={v => set('skewY')(Math.max(-89, Math.min(89, +v || 0)))} />
+            <NumRow label="Scale %" prop="scale" value={node.scale ?? 100} min={1} onChange={v => set('scale')(Math.max(1, Math.min(1000, +v || 100)))} />
+            <NumRow label="Rotation °" prop="rotation" value={node.rotation ?? 0} min={-360} onChange={v => set('rotation')(+v || 0)} />
+            <NumRow label="Skew X °" prop="skewX" value={node.skewX ?? 0} min={-89} onChange={v => set('skewX')(Math.max(-89, Math.min(89, +v || 0)))} />
+            <NumRow label="Skew Y °" prop="skewY" value={node.skewY ?? 0} min={-89} onChange={v => set('skewY')(Math.max(-89, Math.min(89, +v || 0)))} />
             <Select label="Origin" size="sm" options={['center', 'top left', 'top', 'top right', 'left', 'right', 'bottom left', 'bottom', 'bottom right']}
               value={node.transformOrigin || 'center'} onChange={e => set('transformOrigin')(e.target.value)} />
             <Switch label="Flip horizontal" checked={!!node.flipH} onChange={set('flipH')} />
@@ -275,14 +359,14 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
         {isTextKind && (
           <Section title="Typography">
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              <NumRow label="Font size" value={node.fontSize ?? (kind === 'heading' ? 28 : 14)} min={8} onChange={setNum('fontSize', 8)} />
+              <NumRow label="Font size" prop="fontSize" value={node.fontSize ?? (kind === 'heading' ? 28 : 14)} min={8} onChange={setNum('fontSize', 8)} />
               <Select label="Weight" size="sm" options={['regular', 'medium', 'semibold', 'bold']} value={node.fontWeight || (kind === 'heading' ? 'semibold' : 'regular')} onChange={e => set('fontWeight')(e.target.value)} />
               <Select label="Font family" size="sm" options={['Grotesk (UI)', 'Serif display', 'Mono', 'System'].concat(customFonts)} value={node.fontFamily || (kind === 'heading' ? 'Serif display' : 'Grotesk (UI)')} onChange={e => set('fontFamily')(e.target.value)} />
               <NumRow label="Line height" value={node.lineHeight ?? 1.4} min={0.8} step={0.1} onChange={v => set('lineHeight')(+v || 1.4)} />
               <NumRow label="Letter sp." value={node.letterSpacing ?? 0} min={-5} step={0.5} onChange={v => set('letterSpacing')(+v || 0)} />
               <Select label="Transform" size="sm" options={['none', 'uppercase', 'lowercase', 'capitalize']} value={node.textTransform || 'none'} onChange={e => set('textTransform')(e.target.value)} />
               <Select label="Align" size="sm" options={['left', 'center', 'right', 'justify']} value={node.textAlign || 'left'} onChange={e => set('textAlign')(e.target.value)} />
-              <CRow label="Text color" value={node.textColor} onChange={set('textColor')} palette={palette} />
+              <CRow label="Text color" prop="textColor" value={node.textColor} onChange={set('textColor')} palette={palette} />
             </div>
           </Section>
         )}
@@ -319,7 +403,7 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
                       <>
                         <Select label="Position" size="sm" options={[{ value: 'left', label: 'Left' }, { value: 'right', label: 'Right' }, { value: 'only', label: 'Icon only' }]}
                           value={node.btnIconPos || 'left'} onChange={e => set('btnIconPos')(e.target.value)} />
-                        <NumRow label="Gap" value={node.btnIconGap ?? 7} min={0} onChange={v => set('btnIconGap')(Math.max(0, +v || 0))} />
+                        <NumRow label="Gap" prop="btnIconGap" value={node.btnIconGap ?? 7} min={0} onChange={v => set('btnIconGap')(Math.max(0, +v || 0))} />
                       </>
                     } />
                   {iconCustomSource('btnIconSrc', 'btnIconSvg')}
@@ -333,7 +417,7 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
           <Section title="Field">
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <Input label="Placeholder" size="sm" placeholder="name@studio.com" value={node.placeholder || ''} onChange={e => set('placeholder')(e.target.value)} />
-              <Input label="Default value" size="sm" placeholder="Prefilled text" value={node.inputValue || ''} onChange={e => set('inputValue')(e.target.value)} />
+              {bindText('Default value', 'inputValue', { placeholder: 'Prefilled text' })}
               <Input label="Field label" size="sm" placeholder="(none)" value={node.fieldLabel || ''} onChange={e => set('fieldLabel')(e.target.value)} />
               <Input label="Helper text" size="sm" placeholder="(none)" value={node.helperText || ''} onChange={e => set('helperText')(e.target.value)} />
               <CRow label="Placeholder" value={node.placeholderColor} onChange={set('placeholderColor')} palette={palette} />
@@ -414,7 +498,7 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
           <Section title="Textarea">
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <Input label="Placeholder" size="sm" placeholder="Write a message…" value={node.placeholder || ''} onChange={e => set('placeholder')(e.target.value)} />
-              <Input label="Default value" size="sm" placeholder="Prefilled text" value={node.inputValue || ''} onChange={e => set('inputValue')(e.target.value)} />
+              {bindText('Default value', 'inputValue', { placeholder: 'Prefilled text' })}
               <Input label="Field label" size="sm" placeholder="(none)" value={node.fieldLabel || ''} onChange={e => set('fieldLabel')(e.target.value)} />
               <Input label="Helper text" size="sm" placeholder="(none)" value={node.helperText || ''} onChange={e => set('helperText')(e.target.value)} />
               <NumRow label="Rows" value={node.rows ?? 3} min={1} onChange={v => set('rows')(Math.max(1, +v || 1))} />
@@ -477,7 +561,7 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
               <Input label="Title" size="sm" placeholder="Heads up!" value={node.label || ''} onChange={e => onChange(node.id, { label: e.target.value })} />
               <Input label="Message" size="sm" placeholder="Message body" value={node.alertText || ''} onChange={e => set('alertText')(e.target.value)} />
               <div><div style={fieldCap}>Icon</div><IconPicker value={node.alertIcon} onChange={set('alertIcon')} placeholder="No icon" /></div>
-              <CRow label="Text color" value={node.textColor} onChange={set('textColor')} palette={palette} />
+              <CRow label="Text color" prop="textColor" value={node.textColor} onChange={set('textColor')} palette={palette} />
             </div>
           </Section>
         )}
@@ -490,7 +574,7 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
                 <textarea value={node.tableRows || ''} title="Table rows" placeholder={'Rin, Design, Active\nLee, Eng, Away'} onChange={e => set('tableRows')(e.target.value)}
                   style={{ width: '100%', minHeight: 72, boxSizing: 'border-box', padding: 8, border: '1px solid var(--border-default)', background: 'var(--surface-inset)', color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', fontSize: 12, outline: 'none', resize: 'vertical' }} /></div>
               <Switch label="Striped rows" checked={!!node.striped} onChange={set('striped')} />
-              <CRow label="Text color" value={node.textColor} onChange={set('textColor')} palette={palette} />
+              <CRow label="Text color" prop="textColor" value={node.textColor} onChange={set('textColor')} palette={palette} />
             </div>
           </Section>
         )}
@@ -499,11 +583,11 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
           <Section title="Stat">
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <Input label="Label" size="sm" placeholder="Revenue" value={node.label || ''} onChange={e => onChange(node.id, { label: e.target.value })} />
-              <Input label="Value" size="sm" placeholder="$48.2k" value={node.statValue || ''} onChange={e => set('statValue')(e.target.value)} />
+              {bindText('Value', 'statValue', { placeholder: '$48.2k' })}
               <Input label="Delta" size="sm" placeholder="+12.5%" value={node.statDelta || ''} onChange={e => set('statDelta')(e.target.value)} />
               <Select label="Trend" size="sm" options={[{ value: 'up', label: 'Up (green)' }, { value: 'down', label: 'Down (red)' }, { value: 'none', label: 'None' }]}
                 value={node.statTrend || 'up'} onChange={e => set('statTrend')(e.target.value)} />
-              <CRow label="Text color" value={node.textColor} onChange={set('textColor')} palette={palette} />
+              <CRow label="Text color" prop="textColor" value={node.textColor} onChange={set('textColor')} palette={palette} />
             </div>
           </Section>
         )}
@@ -596,9 +680,13 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
                 <ColorField value={node.fillColor} onChange={set('fillColor')} palette={palette}
                   allowGradient gradient={node.gradient} onGradient={set('gradient')} />
               </div>
+              {/* Keyframe the WHOLE fill (solid or gradient) as one CSS string so each key is self-
+                  contained — otherwise only the solid `fillColor` is captured and a keyed gradient is
+                  lost the moment the shared base gradient changes. */}
+              {animActive && <KeyBtn prop="fillColor" value={(window.fillBg && window.fillBg(node)) || ''} />}
             </div>
 
-            <NumRow label="Opacity %" value={node.opacity ?? 100} min={0} onChange={v => set('opacity')(Math.max(0, Math.min(100, +v || 0)))} />
+            <NumRow label="Opacity %" prop="opacity" value={node.opacity ?? 100} min={0} onChange={v => set('opacity')(Math.max(0, Math.min(100, +v || 0)))} />
 
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <span style={{ ...rowLabel, width: 76, flex: 'none' }}>Radius</span>
@@ -607,6 +695,7 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
                 style={{ width: 28, height: 28, flex: 'none', display: 'grid', placeItems: 'center', cursor: 'pointer', background: perCorner ? 'var(--surface-hover)' : 'var(--surface-inset)', border: '1px solid ' + (perCorner ? 'var(--text-primary)' : 'var(--border-subtle)'), borderRadius: 3, color: 'var(--text-secondary)' }}>
                 <i data-lucide="grid-2x2" style={{ width: 13, height: 13 }}></i>
               </button>
+              {animActive && <KeyBtn prop="radius" value={node.radius ?? 0} />}
             </div>
             {perCorner && (
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', columnGap: 6, rowGap: 6 }}>
@@ -627,9 +716,9 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
                   : { borderWidth: 0 })} />
               {borderOn && (
                 <>
-                  <NumRow label="Width" value={node.borderWidth ?? 1} min={0} onChange={v => set('borderWidth')(Math.max(0, +v || 0))} />
+                  <NumRow label="Width" prop="borderWidth" value={node.borderWidth ?? 1} min={0} onChange={v => set('borderWidth')(Math.max(0, +v || 0))} />
                   <Select label="Style" size="sm" options={['solid', 'dashed', 'dotted']} value={node.borderStyle || 'solid'} onChange={e => set('borderStyle')(e.target.value)} />
-                  <CRow label="Color" value={node.borderColor} onChange={set('borderColor')} palette={palette} />
+                  <CRow label="Color" prop="borderColor" value={node.borderColor} onChange={set('borderColor')} palette={palette} />
                 </>
               )}
             </div>
@@ -663,11 +752,12 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
           </div>
         </Section>
 
-        {/* Node-level sections (not per-state) — only shown while editing the Default state. */}
-        {editingState === 'default' && AnimationSection && <AnimationSection node={node} onChange={onChange} />}
-        {editingState === 'default' && ActionsEditor && <ActionsEditor node={node} onChange={onChange} pages={pages} allNodes={otherNodes} workflows={workflows} />}
+        {/* Node-level meta sections (not per-state) — shown only while editing the Default state, and
+            hidden while a component timeline is open since they edit the base, not the animation. */}
+        {showNodeSections && AnimationSection && <AnimationSection node={node} onChange={onChange} />}
+        {showNodeSections && ActionsEditor && <ActionsEditor node={node} onChange={onChange} pages={pages} allNodes={otherNodes} workflows={workflows} />}
 
-        {editingState === 'default' && <Section title="Behavior">
+        {showNodeSections && <Section title="Behavior">
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {responsive && <Switch label="Responsive (per-screen)" checked={node.responsive !== false} onChange={v => onChange(node.id, { responsive: v })} />}
             <Switch label="Clip content"  checked={!!node.clipContent} onChange={v => onChange(node.id, { clipContent: v })} />
@@ -676,7 +766,7 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
           </div>
         </Section>}
 
-        {editingState === 'default' && !frameEditing && <Section title={`Relationships · ${rel.length}`}>
+        {showNodeSections && !frameEditing && <Section title={`Relationships · ${rel.length}`}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             <Select label="Parent frame" size="sm" options={['(none)', ...otherNodes.map(n => n.name)]}
               value={currentParentId ? (allNodes.find(n => n.id === currentParentId)?.name || '(none)') : '(none)'}
@@ -712,6 +802,8 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
         </div>
       )}
     </aside>
+    </InspUI.Provider>
+    </InspCtx.Provider>
   );
 }
 
@@ -719,26 +811,131 @@ function FieldLabel({ children }) {
   return <span style={{ fontSize: 10, fontFamily: 'var(--font-mono)', fontWeight: 600, color: 'var(--text-muted)', userSelect: 'none', textAlign: 'center' }}>{children}</span>;
 }
 
-function NumRow({ label, value, onChange, min = 0, step = 1 }) {
+function NumRow({ label, value, onChange, min = 0, step = 1, prop }) {
+  const ctx = React.useContext(InspCtx);
+  const showKey = !!(prop && ctx && ctx.animActive);
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '76px 1fr', columnGap: 8, alignItems: 'center' }}>
+    <div style={{ display: 'grid', gridTemplateColumns: showKey ? '76px 1fr auto' : '76px 1fr', columnGap: 8, alignItems: 'center' }}>
       <span style={rowLabel}>{label}</span>
       <input type="number" title={label} value={value} min={min} step={step} onChange={e => onChange(e.target.value)} style={numIn} />
+      {showKey && <KeyBtn prop={prop} value={value} />}
     </div>
   );
 }
 
-function CRow({ label, value, onChange, palette }) {
+// Compact number input for the 2×2 Dimensions grid. Occupies one grid cell; when a timeline is open it
+// trails a ◆ keyframe button (W/H/X/Y are all animatable — see TL_UNIVERSAL) inside the same cell.
+function DimIn({ title, prop, value, min, onChange }) {
+  const ctx = React.useContext(InspCtx);
+  const showKey = !!(prop && ctx && ctx.animActive);
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 2, minWidth: 0 }}>
+      <input title={title} type="number" value={value} min={min} onChange={onChange} style={numIn} />
+      {showKey && <KeyBtn prop={prop} value={value} />}
+    </div>
+  );
+}
+
+function CRow({ label, value, onChange, palette, prop }) {
+  const ctx = React.useContext(InspCtx);
+  const showKey = !!(prop && ctx && ctx.animActive);
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
       <span style={{ ...rowLabel, width: 76, flex: 'none' }}>{label}</span>
       {/* minWidth:0 lets the field shrink rather than overflow its row */}
       <div style={{ flex: 1, minWidth: 0 }}><ColorField value={value} onChange={onChange} palette={palette} /></div>
+      {showKey && <KeyBtn prop={prop} value={value} />}
     </div>
   );
 }
 
+// ◆ Keyframe button — on animatable fields while a timeline is open. Filled when the property is already
+// animated (click drops/updates a key at the playhead); hollow when not (click asks first via a centred
+// modal, so the prompt is never clipped by the inspector's scroll area). CSS diamond, no Lucide rescan.
+function KeyBtn({ prop, value }) {
+  const ctx = React.useContext(InspCtx);
+  const secKey = React.useContext(SectionKeyCtx);
+  const elRef = React.useRef(null);
+  const [ask, setAsk] = React.useState(false);
+  // Is this an animatable property while a timeline is open? Gates both the button and the section
+  // registry below. Computed before the early returns so hook order stays stable.
+  const canKey = !!(ctx && ctx.animActive && prop && (!window.TL_ANIMATABLE || window.TL_ANIMATABLE.has(prop)));
+  // Register with the enclosing Section so its "keyframe all" knows this field exists (and can skip it
+  // when the row is hidden by search, via the registered element); the second effect keeps the stored
+  // value fresh on every render (deps-free) so a batch keys the latest value.
+  React.useEffect(() => {
+    if (!secKey || !canKey) return;
+    secKey.add(prop, value, elRef.current);
+    return () => secKey.remove(prop);
+  }, [secKey, canKey, prop]); // eslint-disable-line
+  React.useEffect(() => { if (secKey && canKey) secKey.set(prop, value); });
+  if (!ctx || !ctx.animActive || !prop) return null;
+  // Only show a keyframe button for properties the timeline can actually animate.
+  if (window.TL_ANIMATABLE && !window.TL_ANIMATABLE.has(prop)) return null;
+  const tracked = ctx.tracked.has(prop);
+  const { Dialog, Button } = window.LatticeDesignSystem_e801cb;
+  const commit = () => { if (ctx.onKeyframe) ctx.onKeyframe(prop, value); setAsk(false); };
+  return (
+    <span ref={elRef} style={{ flex: 'none', display: 'inline-flex' }}>
+      <button type="button" onClick={() => (tracked ? commit() : setAsk(true))}
+        title={tracked ? 'Add a keyframe at the playhead' : 'Animate this property'}
+        style={{ width: 24, height: 24, display: 'grid', placeItems: 'center', border: 0, borderRadius: 4, background: ask ? 'var(--surface-hover)' : 'transparent', cursor: 'pointer', flex: 'none' }}>
+        <span style={{ width: 9, height: 9, transform: 'rotate(45deg)', borderRadius: 1,
+          background: tracked ? 'var(--blue-base)' : 'transparent',
+          border: '1.5px solid ' + (tracked ? 'var(--blue-base)' : 'var(--text-disabled)') }} />
+      </button>
+      <Dialog open={ask} onClose={() => setAsk(false)} width={400}
+        title="Animate this property?"
+        description={<span><b style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>{prop}</b> isn’t animated yet. Add a keyframe track for it at the current playhead?</span>}
+        footer={<>
+          <Button variant="outline" size="sm" onClick={() => setAsk(false)}>No</Button>
+          <Button variant="solid" size="sm" onClick={commit}>Yes</Button>
+        </>} />
+    </span>
+  );
+}
+
+// ⚡ Insert-variable button — shown whenever local/global variables exist. Opens a menu of {{name}}
+// tokens; picking one calls onPick(v) so the caller splices the token into its field (Power-Automate style).
+function BindMenu({ onPick }) {
+  const ctx = React.useContext(InspCtx);
+  const [open, setOpen] = React.useState(false);
+  const ref = React.useRef(null);
+  React.useEffect(() => {
+    if (!open) return;
+    const on = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const t = setTimeout(() => document.addEventListener('mousedown', on), 0);
+    return () => { clearTimeout(t); document.removeEventListener('mousedown', on); };
+  }, [open]);
+  if (!ctx || !ctx.vars.length) return null;
+  return (
+    <span ref={ref} style={{ position: 'relative', flex: 'none', display: 'inline-flex' }}>
+      <button type="button" onClick={() => setOpen(o => !o)} title="Insert a variable value"
+        style={{ width: 24, height: 24, display: 'grid', placeItems: 'center', border: 0, borderRadius: 4, background: open ? 'var(--surface-hover)' : 'transparent', color: open ? 'var(--amber-base, #FB923C)' : 'var(--text-muted)', cursor: 'pointer', flex: 'none' }}>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z" /></svg>
+      </button>
+      {open && (
+        <div style={accPop}>
+          <div style={{ fontSize: 9.5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.1em', color: 'var(--text-disabled)', marginBottom: 6 }}>Insert variable</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, maxHeight: 200, overflowY: 'auto' }}>
+            {ctx.vars.map(v => (
+              <button key={v.id + v.scope} type="button" onClick={() => { onPick(v); setOpen(false); }}
+                style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '6px 7px', border: 0, borderRadius: 3, background: 'transparent', cursor: 'pointer', textAlign: 'left' }}
+                onMouseEnter={e => e.currentTarget.style.background = 'var(--surface-hover)'} onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{'{{' + v.name + '}}'}</span>
+                <span style={{ marginLeft: 'auto', flex: 'none', fontSize: 9.5, color: 'var(--text-disabled)' }}>{v.scope}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
 const rowLabel = { fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', userSelect: 'none' };
+// Small popover anchored to the ⚡ variable button.
+const accPop = { position: 'absolute', top: 27, right: 0, width: 190, zIndex: 60, padding: 10, background: 'var(--surface-raised)', border: '1px solid var(--border-default)', borderRadius: 6, boxShadow: 'var(--shadow-overlay)' };
 const dividerBlock = { borderTop: '1px solid var(--border-subtle)', paddingTop: 10, display: 'flex', flexDirection: 'column', gap: 10 };
 const fieldCap = { fontSize: 12, fontWeight: 500, color: 'var(--text-secondary)', marginBottom: 6 };
 const numIn = {
@@ -753,18 +950,94 @@ const saveCollapsed = () => { try { localStorage.setItem('lattice_collapsed', JS
 
 // Collapsible option group: click the header to fold it away (like a dropdown), so tall panels
 // don't force endless scrolling. The caret is a CSS-rotated glyph (no Lucide re-scan needed).
+// Reacts to the inspector toolbar: a header search hides sections that don't contain the query (and
+// force-opens the ones that do), and the collapse/expand-all button folds every section at once.
 function Section({ title, children }) {
+  const ui = React.useContext(InspUI);
+  const insp = React.useContext(InspCtx);
+  const q = ((ui && ui.query) || '').trim().toLowerCase();
   const [open, setOpen] = React.useState(!COLLAPSED.has(title));
-  const toggle = () => { setOpen(o => { const n = !o; n ? COLLAPSED.delete(title) : COLLAPSED.add(title); saveCollapsed(); return n; }); };
+  const bodyRef = React.useRef(null);
+  const [noMatch, setNoMatch] = React.useState(false);
+
+  // Animatable props rendered in this section, registered by descendant ◆ KeyBtns (prop → live value).
+  // The header's "keyframe all" reads this to drop a key on every one at once. Count drives visibility.
+  const keyReg = React.useRef(new Map());
+  const [keyCount, setKeyCount] = React.useState(0);
+  const keyApi = React.useMemo(() => ({
+    add: (prop, value, el) => { keyReg.current.set(prop, { value, el }); setKeyCount(keyReg.current.size); },
+    set: (prop, value) => { const e = keyReg.current.get(prop); if (e) e.value = value; },
+    remove: (prop) => { keyReg.current.delete(prop); setKeyCount(keyReg.current.size); },
+  }), []);
+
+  // Collapse-all / expand-all: apply only on a fresh click (bumped `n`), never on mount/remount — so a
+  // section that was manually toggled afterward keeps its own state when you switch nodes.
+  const sig = ui && ui.collapseSig;
+  const prevN = React.useRef(sig ? sig.n : 0);
+  React.useEffect(() => {
+    if (!sig || sig.n === prevN.current) return;
+    prevN.current = sig.n;
+    setOpen(sig.open);
+    sig.open ? COLLAPSED.delete(title) : COLLAPSED.add(title);
+    saveCollapsed();
+  }, [sig && sig.n]); // eslint-disable-line
+
+  // Search: hide the individual rows that don't match, keeping the section only when its title or at
+  // least one row matches. Rows sit one level below the common flex-column body wrapper (or directly
+  // under the body). Original `display` is stashed on the node so un-hiding restores grid/flex rows.
+  React.useLayoutEffect(() => {
+    const body = bodyRef.current;
+    const host = (body && body.children.length === 1 && body.children[0].style && body.children[0].style.flexDirection === 'column')
+      ? body.children[0] : body;
+    const rows = host ? Array.from(host.children) : [];
+    const restore = (el) => { if (el.dataset.dsHide === '1') { el.style.display = el.dataset.dsDisp || ''; delete el.dataset.dsHide; delete el.dataset.dsDisp; } };
+    const hide = (el) => { if (el.dataset.dsHide !== '1') { el.dataset.dsDisp = el.style.display || ''; el.dataset.dsHide = '1'; } el.style.display = 'none'; };
+    if (!q || title.toLowerCase().includes(q)) { rows.forEach(restore); if (noMatch) setNoMatch(false); return; }
+    let any = false;
+    rows.forEach(el => (el.textContent || '').toLowerCase().includes(q) ? (any = true, restore(el)) : hide(el));
+    setNoMatch(!any);
+  });
+
+  if (q && noMatch) return null;
+  const showOpen = q ? true : open;               // a search always reveals matching sections
+  const mount = showOpen || !!q;                  // keep content mounted while searching so it's scannable
+  const toggle = () => { if (q) return; setOpen(o => { const n = !o; n ? COLLAPSED.delete(title) : COLLAPSED.add(title); saveCollapsed(); return n; }); };
+  // "Keyframe all" — visible whenever a timeline is open and the section has animatable fields (search
+  // included, so it stays reachable while filtering). Keys every currently-visible registered prop at
+  // the playhead — rows hidden by search are skipped (offsetParent === null), so it's WYSIWYG — and
+  // tracks are created as needed with no per-field prompt.
+  const showKeyAll = !!(insp && insp.animActive) && keyCount > 0;
+  const keyframeAll = (e) => {
+    e.stopPropagation();
+    if (!insp || !insp.onKeyframe) return;
+    keyReg.current.forEach((entry, p) => {
+      if (entry.el && entry.el.offsetParent === null) return; // hidden by search/collapse → skip
+      insp.onKeyframe(p, entry.value);
+    });
+  };
   return (
+    <SectionKeyCtx.Provider value={keyApi}>
     <div>
-      <button type="button" onClick={toggle}
-        style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 6, padding: 0, border: 0, background: 'transparent', cursor: 'pointer', marginBottom: open ? 9 : 0, textAlign: 'left' }}>
-        <span style={{ fontSize: 9, color: 'var(--text-disabled)', display: 'inline-block', transform: open ? 'rotate(90deg)' : 'none', transition: 'transform 120ms' }}>▶</span>
-        <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--text-muted)' }}>{title}</span>
-      </button>
-      {open && children}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: showOpen ? 9 : 0 }}>
+        <button type="button" onClick={toggle}
+          style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 6, padding: 0, border: 0, background: 'transparent', cursor: q ? 'default' : 'pointer', textAlign: 'left' }}>
+          <span style={{ fontSize: 9, color: 'var(--text-disabled)', display: 'inline-block', transform: showOpen ? 'rotate(90deg)' : 'none', transition: 'transform 120ms' }}>▶</span>
+          <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--text-muted)' }}>{title}</span>
+        </button>
+        {showKeyAll && (
+          <button type="button" onClick={keyframeAll}
+            title="Keyframe every animatable property shown in this group, at the playhead"
+            style={{ flex: 'none', height: 20, display: 'inline-flex', alignItems: 'center', gap: 4, padding: '0 6px', border: '1px solid var(--border-subtle)', borderRadius: 4, background: 'transparent', color: 'var(--text-muted)', cursor: 'pointer' }}
+            onMouseEnter={e => { e.currentTarget.style.background = 'var(--surface-hover)'; e.currentTarget.style.color = 'var(--text-secondary)'; }}
+            onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-muted)'; }}>
+            <span style={{ width: 8, height: 8, transform: 'rotate(45deg)', borderRadius: 1, border: '1.5px solid var(--blue-base)' }} />
+            <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: '0.04em', lineHeight: 1 }}>KEY ALL</span>
+          </button>
+        )}
+      </div>
+      <div ref={bodyRef} style={{ display: showOpen ? undefined : 'none' }}>{mount ? children : null}</div>
     </div>
+    </SectionKeyCtx.Provider>
   );
 }
 

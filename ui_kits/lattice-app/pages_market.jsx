@@ -31,6 +31,7 @@ const KIND_LABEL = {
   list: 'List', image: 'Image', divider: 'Divider',
 };
 const GROUP_ORDER = ['Buttons', 'Cards & panels', 'Typography', 'Forms', 'Badges & status', 'Data & charts'];
+const TEMPLATE_GROUP_ORDER = ['Starters', 'Sidebar menus', 'Tab bars', 'Pill bars'];
 
 // --- Live previews ------------------------------------------------------------------------------
 // The Market renders every asset as the real thing (via the editor's PreviewNode), not an icon.
@@ -74,28 +75,42 @@ function ComponentThumb({ base, props, id }) {
   return <Stage grid><NodePreview node={node} /></Stage>;
 }
 
-// A template: its first page rendered as a scaled-down mini canvas.
-function TemplateThumb({ canvas }) {
+// A template's active page, rendered as a real (scaled) mini canvas that fits maxW×maxH. Shared by
+// the card thumbnail (small) and the Preview modal (large). Returns null when there's nothing to draw.
+function TemplateCanvasView({ canvas, maxW, maxH }) {
   const page = canvas && canvas.pages && (canvas.pages.find(p => p.id === canvas.activePageId) || canvas.pages[0]);
   const nodes = (page && page.nodes) || [];
-  if (!nodes.length || !window.PreviewNode) return <AssetThumb icon="layout-template" />;
+  if (!nodes.length || !window.PreviewNode) return null;
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   nodes.forEach(n => { minX = Math.min(minX, n.x); minY = Math.min(minY, n.y); maxX = Math.max(maxX, n.x + n.w); maxY = Math.max(maxY, n.y + n.h); });
   const bw = maxX - minX, bh = maxY - minY;
-  const k = fitScale(bw, bh, 210, 108);
+  const k = fitScale(bw, bh, maxW, maxH);
+  // A menu's active item carries its "active" look in states.click; static PreviewNode ignores states,
+  // so bake that pose into the marked (navActive) item so the thumbnail shows which item is selected.
+  const STATE_META = { dur: 1, ease: 1, off: 1, animId: 1, preset: 1, holdMs: 1, sustain: 1 };
+  const posed = (n) => {
+    if (!n.navActive || !n.states || !n.states.click) return n;
+    const ov = {}; for (const key in n.states.click) if (!STATE_META[key]) ov[key] = n.states.click[key];
+    return Object.assign({}, n, ov);
+  };
   return (
-    <Stage grid>
-      <div style={{ position: 'relative', width: bw * k, height: bh * k }}>
-        <div style={{ position: 'absolute', top: 0, left: 0, width: bw, height: bh, transform: `scale(${k})`, transformOrigin: 'top left' }}>
-          {nodes.map(n => (
-            <div key={n.id} style={{ position: 'absolute', left: n.x - minX, top: n.y - minY, width: n.w, height: n.h }}>
-              <window.PreviewNode node={n} />
-            </div>
-          ))}
-        </div>
+    <div style={{ position: 'relative', width: bw * k, height: bh * k }}>
+      <div style={{ position: 'absolute', top: 0, left: 0, width: bw, height: bh, transform: `scale(${k})`, transformOrigin: 'top left' }}>
+        {nodes.map(n => (
+          <div key={n.id} style={{ position: 'absolute', left: n.x - minX, top: n.y - minY, width: n.w, height: n.h }}>
+            <window.PreviewNode node={posed(n)} />
+          </div>
+        ))}
       </div>
-    </Stage>
+    </div>
   );
+}
+
+// A template: its first page rendered as a scaled-down mini canvas.
+function TemplateThumb({ canvas }) {
+  const inner = TemplateCanvasView({ canvas, maxW: 210, maxH: 108 });
+  if (!inner) return <AssetThumb icon="layout-template" />;
+  return <Stage grid>{inner}</Stage>;
 }
 
 // An interaction animation: the target state (hover/press) resolved through the same appearance
@@ -183,7 +198,7 @@ function CardBody({ name, description, tag, children }) {
         </div>
       )}
       {description && <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.5, flex: 1 }}>{description}</div>}
-      <div style={{ display: 'flex', gap: 8, marginTop: 2 }}>{children}</div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 2 }}>{children}</div>
     </div>
   );
 }
@@ -196,6 +211,209 @@ function SectionHead({ children }) {
   return <div style={{ fontSize: 10.5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--text-muted)', margin: '4px 2px 12px' }}>{children}</div>;
 }
 
+// --- Interactive menu demos (Preview modal) -----------------------------------------------------
+// The menu templates are static canvases in the editor; in the Preview modal we render a live,
+// clickable version so the active-highlight motion (the whole point of these menus) is visible.
+var MK_INK = '#3b2f96', MK_AC = '#4f46e5';
+var MK_SB_ITEMS = [
+  { icon: 'layout-grid', label: 'Dashboard' }, { icon: 'folder', label: 'Files' },
+  { icon: 'bar-chart-3', label: 'Reports' }, { icon: 'users', label: 'Team' }, { icon: 'settings', label: 'Settings' },
+];
+var MK_TAB_ITEMS = ['Overview', 'Activity', 'Reports', 'Settings'];
+var MK_PILL_ITEMS = ['All', 'Design', 'Code', 'Prototype', 'Handoff'];
+var MK_EASE = 'transform .3s cubic-bezier(.4,0,.2,1)';
+
+function MkSidebar({ variant }) {
+  const [on, setOn] = React.useState(0);
+  const items = MK_SB_ITEMS, ROW = 50;
+  if (variant === 'rail') {
+    return (
+      <div style={{ width: 216, background: 'var(--surface-card)', border: '1px solid var(--border-subtle)', borderRadius: 16, padding: '12px 0' }}>
+        <div style={{ padding: '2px 18px 12px', fontFamily: 'var(--font-serif-display)', fontWeight: 600, fontSize: 16 }}>Lattice</div>
+        <div style={{ position: 'relative' }}>
+          <div style={{ position: 'absolute', left: 8, right: 8, top: 5, height: 40, borderRadius: 10, background: 'var(--surface-hover)', transform: `translateY(${on * ROW}px)`, transition: MK_EASE }} />
+          <div style={{ position: 'absolute', left: 0, top: 11, width: 3, height: 28, borderRadius: 2, background: MK_AC, transform: `translateY(${on * ROW}px)`, transition: MK_EASE }} />
+          {items.map((it, i) => (
+            <button key={i} type="button" onClick={() => setOn(i)} style={{ position: 'relative', zIndex: 1, display: 'flex', alignItems: 'center', gap: 12, width: '100%', height: ROW, padding: '0 18px', background: 'transparent', border: 0, cursor: 'pointer', color: i === on ? 'var(--text-primary)' : 'var(--text-muted)', fontSize: 13, fontWeight: i === on ? 600 : 400, transition: 'color .2s' }}>
+              <Ic n={it.icon} s={18} /><span>{it.label}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+  if (variant === 'pill') {
+    return (
+      <div style={{ width: 210, background: MK_INK, borderRadius: 20, padding: '14px 12px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 6px 14px', color: '#fff' }}>
+          <Ic n="box" s={18} /><span style={{ fontFamily: 'var(--font-serif-display)', fontSize: 16, fontWeight: 600 }}>Lattice</span>
+        </div>
+        <div style={{ position: 'relative' }}>
+          <div style={{ position: 'absolute', left: 0, right: 0, top: 5, height: 40, background: '#fff', borderRadius: 12, transform: `translateY(${on * ROW}px)`, transition: MK_EASE }} />
+          {items.map((it, i) => (
+            <button key={i} type="button" onClick={() => setOn(i)} style={{ position: 'relative', zIndex: 1, display: 'flex', alignItems: 'center', gap: 12, width: '100%', height: ROW, padding: '0 14px', background: 'transparent', border: 0, cursor: 'pointer', color: i === on ? MK_INK : 'rgba(255,255,255,0.82)', fontSize: 13, fontWeight: i === on ? 600 : 400, transition: 'color .2s' }}>
+              <Ic n={it.icon} s={18} /><span>{it.label}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+  // notch: compact icon-only rail with a sliding rounded indicator
+  const NR = 52;
+  return (
+    <div style={{ width: 86, background: MK_INK, borderRadius: 22, padding: '14px 0' }}>
+      <div style={{ textAlign: 'center', color: '#fff', fontWeight: 600, fontSize: 13, marginBottom: 12 }}>CI</div>
+      <div style={{ position: 'relative' }}>
+        <div style={{ position: 'absolute', left: 10, right: 10, top: 4, height: NR - 8, background: '#fff', borderRadius: 14, transform: `translateY(${on * NR}px)`, transition: MK_EASE }} />
+        {items.map((it, i) => (
+          <button key={i} type="button" aria-label={it.label} onClick={() => setOn(i)} style={{ position: 'relative', zIndex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', height: NR, background: 'transparent', border: 0, cursor: 'pointer', color: i === on ? MK_INK : 'rgba(255,255,255,0.8)', transition: 'color .2s' }}>
+            <Ic n={it.icon} s={20} />
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MkTabBar({ variant }) {
+  const [on, setOn] = React.useState(0);
+  const items = MK_TAB_ITEMS, n = items.length;
+  if (variant === 'filled') {
+    return (
+      <div style={{ display: 'flex', gap: 6, background: 'var(--surface-card)', padding: 6, borderRadius: 12, border: '1px solid var(--border-subtle)', minWidth: 400 }}>
+        {items.map((t, i) => (
+          <button key={i} type="button" onClick={() => setOn(i)} style={{ flex: 1, textAlign: 'center', padding: '9px 14px', fontSize: 13, borderRadius: 10, border: 0, cursor: 'pointer', background: i === on ? MK_AC : 'transparent', color: i === on ? '#fff' : 'var(--text-muted)', fontWeight: i === on ? 600 : 400, transition: 'background .2s, color .2s' }}>{t}</button>
+        ))}
+      </div>
+    );
+  }
+  if (variant === 'segmented') {
+    return (
+      <div style={{ position: 'relative', display: 'flex', background: 'var(--surface-hover)', borderRadius: 10, padding: 3, minWidth: 420 }}>
+        <div style={{ position: 'absolute', top: 3, bottom: 3, width: `calc((100% - 6px) / ${n})`, left: `calc(3px + ${on} * ((100% - 6px) / ${n}))`, background: 'var(--surface-card)', borderRadius: 8, boxShadow: '0 1px 3px rgba(0,0,0,.3)', transition: 'left .3s cubic-bezier(.4,0,.2,1)' }} />
+        {items.map((t, i) => (
+          <button key={i} type="button" onClick={() => setOn(i)} style={{ position: 'relative', zIndex: 1, flex: 1, textAlign: 'center', padding: '8px 14px', fontSize: 12.5, border: 0, cursor: 'pointer', background: 'transparent', color: i === on ? 'var(--text-primary)' : 'var(--text-muted)', fontWeight: i === on ? 600 : 400, transition: 'color .2s' }}>{t}</button>
+        ))}
+      </div>
+    );
+  }
+  // underline
+  return (
+    <div style={{ minWidth: 420 }}>
+      <div style={{ position: 'relative', display: 'flex' }}>
+        {items.map((t, i) => (
+          <button key={i} type="button" onClick={() => setOn(i)} style={{ flex: 1, textAlign: 'center', padding: '11px 14px', fontSize: 13, border: 0, cursor: 'pointer', background: 'transparent', color: i === on ? 'var(--text-primary)' : 'var(--text-muted)', fontWeight: i === on ? 500 : 400, transition: 'color .2s' }}>{t}</button>
+        ))}
+        <div style={{ position: 'absolute', bottom: 0, height: 2, background: MK_AC, width: `${100 / n}%`, transform: `translateX(${on * 100}%)`, transition: MK_EASE }} />
+      </div>
+      <div style={{ height: 1, background: 'var(--border-subtle)' }} />
+    </div>
+  );
+}
+
+function MkPillBar({ variant }) {
+  const [on, setOn] = React.useState(0);
+  const items = MK_PILL_ITEMS;
+  const chipStyle = (i) => {
+    const active = i === on;
+    const s = { padding: '8px 16px', borderRadius: 999, fontSize: 12.5, cursor: 'pointer', border: '1px solid transparent', background: 'transparent', color: 'var(--text-muted)', transition: 'background .2s, color .2s, border-color .2s', fontWeight: active ? 600 : 400 };
+    if (active && variant === 'solid') { s.background = MK_AC; s.color = '#fff'; }
+    if (active && variant === 'outline') { s.borderColor = MK_AC; s.color = MK_AC; }
+    if (active && variant === 'soft') { s.background = `color-mix(in srgb, ${MK_AC} 16%, transparent)`; s.color = MK_AC; }
+    return s;
+  };
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center', maxWidth: 420 }}>
+      {items.map((t, i) => <button key={i} type="button" onClick={() => setOn(i)} style={chipStyle(i)}>{t}</button>)}
+    </div>
+  );
+}
+
+var MK_MENU_MAP = {
+  'tpl-menu-sidebar-pill': ['sidebar', 'pill'], 'tpl-menu-sidebar-notch': ['sidebar', 'notch'], 'tpl-menu-sidebar-rail': ['sidebar', 'rail'],
+  'tpl-menu-tabs-underline': ['tabs', 'underline'], 'tpl-menu-tabs-filled': ['tabs', 'filled'], 'tpl-menu-tabs-segmented': ['tabs', 'segmented'],
+  'tpl-menu-pills-solid': ['pills', 'solid'], 'tpl-menu-pills-outline': ['pills', 'outline'], 'tpl-menu-pills-soft': ['pills', 'soft'],
+};
+
+function MkMenuDemo({ id }) {
+  const m = MK_MENU_MAP[id];
+  React.useLayoutEffect(() => { const t = setTimeout(() => window.renderLucideIcons && window.renderLucideIcons(), 0); return () => clearTimeout(t); }, []);
+  if (!m) return null;
+  const family = m[0], variant = m[1];
+  const el = family === 'sidebar' ? <MkSidebar variant={variant} /> : family === 'tabs' ? <MkTabBar variant={variant} /> : <MkPillBar variant={variant} />;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
+      <div style={{ transform: family === 'sidebar' ? 'scale(1.05)' : 'scale(1.08)' }}>{el}</div>
+      <div style={{ fontSize: 11.5, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>Click the items — the highlight follows.</div>
+    </div>
+  );
+}
+
+// A large, live render of an asset for the Preview modal — same renderers as the card thumbnails,
+// just given more room (templates fit a big box; shaders fill; components/animations scale up).
+function BigPreview({ type, spec }) {
+  const box = { position: 'relative', minHeight: 340, maxHeight: '62vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 28, overflow: 'hidden', boxSizing: 'border-box' };
+  if (type === 'shader' && spec.code) {
+    return <div style={{ ...box, background: 'var(--bg-void)', padding: 0 }}>{window.ShaderFill ? <div style={{ position: 'absolute', inset: 0 }}><window.ShaderFill code={spec.code} speed={1} /></div> : null}</div>;
+  }
+  if (type === 'component' && spec.base) {
+    const node = { id: 'cs_' + (spec.id || 'x'), kind: spec.base, name: (spec.props && spec.props.label) || '', ...(spec.props || {}) };
+    return <div className="lattice-grid" style={{ ...box, background: 'var(--surface)' }}><NodePreview node={node} maxW={560} maxH={320} /></div>;
+  }
+  if (type === 'animation' && spec.states) {
+    return <div className="lattice-grid" style={{ ...box, background: 'var(--surface)' }}><div style={{ transform: 'scale(1.7)' }}><AnimThumb states={spec.states} id={spec.id} /></div></div>;
+  }
+  // Menu templates get a live, clickable demo instead of the static canvas.
+  if (type === 'template' && MK_MENU_MAP[spec.id]) {
+    return <div className="lattice-grid" style={{ ...box, background: 'var(--surface)' }}><MkMenuDemo id={spec.id} /></div>;
+  }
+  const inner = TemplateCanvasView({ canvas: spec.canvas, maxW: 780, maxH: 460 });
+  return <div className="lattice-grid" style={{ ...box, background: 'var(--surface)' }}>{inner || <AssetThumb icon="layout-template" />}</div>;
+}
+
+// In-page Preview modal: a lightweight backdrop + panel (own width, not the small DS Dialog) that
+// shows the asset large with the same Install / Use template actions as the card.
+function PreviewModal({ entry, installed, busy, onClose, onUse, onInstall }) {
+  const { Button, Tag } = window.LatticeDesignSystem_e801cb;
+  const item = entry.item, type = entry.type;
+  const spec = { id: item.id, base: item.base, props: item.props, code: item.code, states: item.states, canvas: item.canvas };
+  React.useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    // Paint any Lucide glyphs the enlarged preview introduces.
+    const t = setTimeout(() => window.renderLucideIcons && window.renderLucideIcons(), 0);
+    return () => { window.removeEventListener('keydown', onKey); clearTimeout(t); };
+  }, [item.id]);
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 400, background: 'rgba(0,0,0,0.62)', backdropFilter: 'blur(2px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+      <div onClick={e => e.stopPropagation()} style={{ width: 'min(880px, 96vw)', maxHeight: '92vh', overflow: 'auto', background: 'var(--surface-card)', border: '1px solid var(--border-default)', boxShadow: 'var(--shadow-overlay)', display: 'flex', flexDirection: 'column' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '14px 16px', borderBottom: '1px solid var(--border-subtle)' }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)' }}>{item.name}</div>
+            {item.description && <div style={{ fontSize: 12.5, color: 'var(--text-muted)', marginTop: 2 }}>{item.description}</div>}
+          </div>
+          <Tag shape="pill">{(TYPE_META[type] && TYPE_META[type].label) || type}</Tag>
+          <Button variant="ghost" size="sm" onClick={onClose} iconLeft={<Ic n="x" s={15} />}>Close</Button>
+        </div>
+        <PreviewBoundary fallback={<div style={{ padding: 40, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>Preview unavailable.</div>}>
+          <BigPreview type={type} spec={spec} />
+        </PreviewBoundary>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, padding: '14px 16px', borderTop: '1px solid var(--border-subtle)', justifyContent: 'flex-end' }}>
+          {type === 'template' && (
+            <Button variant="solid" size="sm" disabled={busy} onClick={onUse} iconLeft={<Ic n="rocket" s={14} />}>Use template</Button>
+          )}
+          <Button variant={installed ? 'ghost' : (type === 'template' ? 'outline' : 'solid')} size="sm"
+            disabled={busy || (installed && type !== 'template')} onClick={onInstall}
+            iconLeft={<Ic n={installed ? 'check' : 'download'} s={14} />}>
+            {installed ? 'Installed' : 'Install'}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // --- Market -------------------------------------------------------------------------------------
 function Market() {
   const { Button } = window.LatticeDesignSystem_e801cb;
@@ -203,6 +421,7 @@ function Market() {
   const [catalog, setCatalog] = React.useState(null);
   const [library, setLibrary] = React.useState([]);
   const [busy, setBusy] = React.useState('');
+  const [preview, setPreview] = React.useState(null); // { item, key, type } for the Preview modal
 
   const reloadLib = React.useCallback(() => api.library().then(r => setLibrary(r.items)).catch(() => {}), []);
   React.useEffect(() => {
@@ -243,13 +462,19 @@ function Market() {
     const installed = installedSources.has(item.id);
     const tag = type === 'component' ? (KIND_LABEL[item.base] || 'Component') : TYPE_META[type].label;
     const spec = { id: item.id, base: item.base, props: item.props, code: item.code, states: item.states, canvas: item.canvas };
+    const openPreview = () => setPreview({ item, key, type });
     return (
       <Card key={item.id}>
-        <AssetPreview type={type} spec={spec} />
+        {/* Thumbnail doubles as a preview trigger (hover reveals a "Preview" hint). */}
+        <div className="mk-thumb" onClick={openPreview} style={{ position: 'relative', cursor: 'pointer' }} title="Click to preview">
+          <AssetPreview type={type} spec={spec} />
+          <div className="mk-thumb-ov"><span><Ic n="eye" s={13} /> Preview</span></div>
+        </div>
         <CardBody name={item.name} description={item.description} tag={tag}>
           {type === 'template' && (
             <Button variant="solid" size="sm" disabled={busy === item.id} onClick={() => useTemplate(item)} iconLeft={<Ic n="rocket" s={14} />}>Use template</Button>
           )}
+          <Button variant="ghost" size="sm" onClick={openPreview} iconLeft={<Ic n="eye" s={14} />}>Preview</Button>
           <Button variant={installed ? 'ghost' : (type === 'template' ? 'outline' : 'solid')} size="sm"
             disabled={busy === item.id || (installed && type !== 'template')}
             onClick={() => install(key, item)}
@@ -275,11 +500,14 @@ function Market() {
       ) : sections.map(([key, label, type]) => {
         const items = catalog[key] || [];
         if (!items.length) return null;
-        // Component styles are sub-grouped (Buttons, Cards & panels, Typography, …); the rest are flat.
-        if (key === 'componentStyles') {
+        // Component styles and templates are sub-grouped (Buttons…, or Starters / Sidebar menus…);
+        // the rest render flat.
+        if (key === 'componentStyles' || key === 'templates') {
+          const order = key === 'templates' ? TEMPLATE_GROUP_ORDER : GROUP_ORDER;
+          const defGroup = key === 'templates' ? 'Templates' : 'Components';
           const groups = {};
-          items.forEach(it => { const g = it.group || 'Components'; (groups[g] = groups[g] || []).push(it); });
-          const ordered = [...GROUP_ORDER.filter(g => groups[g]), ...Object.keys(groups).filter(g => !GROUP_ORDER.includes(g))];
+          items.forEach(it => { const g = it.group || defGroup; (groups[g] = groups[g] || []).push(it); });
+          const ordered = [...order.filter(g => groups[g]), ...Object.keys(groups).filter(g => !order.includes(g))];
           return (
             <div key={key} style={{ marginBottom: 30 }}>
               <SectionHead>{label}</SectionHead>
@@ -299,6 +527,23 @@ function Market() {
           </div>
         );
       })}
+
+      {preview && (
+        <PreviewModal
+          entry={preview}
+          installed={installedSources.has(preview.item.id)}
+          busy={busy === preview.item.id}
+          onClose={() => setPreview(null)}
+          onUse={() => { const it = preview.item; setPreview(null); useTemplate(it); }}
+          onInstall={() => install(preview.key, preview.item)}
+        />
+      )}
+
+      <style>{`
+        .mk-thumb-ov { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.34); opacity: 0; transition: opacity .15s ease; pointer-events: none; }
+        .mk-thumb:hover .mk-thumb-ov { opacity: 1; }
+        .mk-thumb-ov > span { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: #fff; background: rgba(0,0,0,0.6); padding: 6px 11px; }
+      `}</style>
     </AppShell>
   );
 }

@@ -42,9 +42,10 @@ function WorkflowView({
                   ...(pageVars || []).map(v => ({ ...v, scopeLabel: pageName || 'Page' }))];
   const varOptions = [{ value: '', label: 'Select variable…' }, ...merged.map(v => ({ value: v.id, label: `${v.name} · ${v.scopeLabel}` }))];
   // `anims` lets the Play-component-animation node offer only the animation states a node actually owns.
+  // Disabled states are hidden here — that's all the Enable/disable toggle does: gate workflow-node use.
   const allPageNodes = (pages || []).flatMap(p => (p.nodes || []).map(n => ({
     id: n.id, label: `${p.name} / ${n.name}`,
-    anims: (n.customStates || []).filter(c => (c.type || 'static') === 'anim').map(c => ({ id: c.id, name: c.name })),
+    anims: (n.customStates || []).filter(c => (c.type || 'static') === 'anim' && (!window.stateEnabled || window.stateEnabled(n, c.id))).map(c => ({ id: c.id, name: c.name })),
   })));
 
   React.useEffect(() => { if (window.renderLucideIcons) window.renderLucideIcons(); });

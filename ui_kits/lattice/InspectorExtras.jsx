@@ -1,15 +1,18 @@
-/* global React, Section, NumRow, ColorField, IconPicker */
+/* global React, Section, NumRow, KeyBtn, ColorField, IconPicker */
 // Cross-kind Inspector sections: Animation, Hover, Interactions, Effects. Reuses global
-// Section/NumRow (from Inspector.jsx) and ColorField.
+// Section/NumRow/KeyBtn (from Inspector.jsx) and ColorField.
 
 const rowLbl = { fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', userSelect: 'none' };
 
-function ColorRowLabeled({ label, value, onChange, palette }) {
+// Pass `prop` (an animatable property key) to trail a ◆ keyframe button while a timeline is open —
+// KeyBtn self-gates, so non-animatable colours (hover/effect swatches) simply omit it.
+function ColorRowLabeled({ label, value, onChange, palette, prop }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
       <span style={{ ...rowLbl, width: 76, flex: 'none' }}>{label}</span>
       {/* minWidth:0 lets the field shrink inside narrow effect cards instead of overflowing them */}
       <div style={{ flex: 1, minWidth: 0 }}><ColorField value={value} onChange={onChange} palette={palette} /></div>
+      {prop && typeof KeyBtn !== 'undefined' && <KeyBtn prop={prop} value={value} />}
     </div>
   );
 }
@@ -272,11 +275,11 @@ function IconOptions({ node, onChange, palette, keys = {}, showPicker = true, pi
           <IconPicker value={node[keys.name]} onChange={set(keys.name)} placeholder="No icon" />
         </div>
       )}
-      {keys.size   && <NumRow label="Size"   value={val(keys.size, dSize)} min={4} onChange={v => set(keys.size)(Math.max(4, +v || 4))} />}
-      {keys.color  && <ColorRowLabeled label="Color" value={node[keys.color]} onChange={set(keys.color)} palette={palette} />}
-      {keys.stroke && <NumRow label="Stroke" value={val(keys.stroke, 2)} min={0.25} step={0.25} onChange={v => set(keys.stroke)(Math.max(0.25, Math.min(6, +v || 2)))} />}
-      {keys.rotate && <NumRow label="Rotation °" value={val(keys.rotate, 0)} min={-360} onChange={v => set(keys.rotate)(+v || 0)} />}
-      {keys.opacity && <NumRow label="Opacity %" value={val(keys.opacity, 100)} min={0} onChange={v => set(keys.opacity)(Math.max(0, Math.min(100, +v || 0)))} />}
+      {keys.size   && <NumRow label="Size"   prop={keys.size} value={val(keys.size, dSize)} min={4} onChange={v => set(keys.size)(Math.max(4, +v || 4))} />}
+      {keys.color  && <ColorRowLabeled label="Color" prop={keys.color} value={node[keys.color]} onChange={set(keys.color)} palette={palette} />}
+      {keys.stroke && <NumRow label="Stroke" prop={keys.stroke} value={val(keys.stroke, 2)} min={0.25} step={0.25} onChange={v => set(keys.stroke)(Math.max(0.25, Math.min(6, +v || 2)))} />}
+      {keys.rotate && <NumRow label="Rotation °" prop={keys.rotate} value={val(keys.rotate, 0)} min={-360} onChange={v => set(keys.rotate)(+v || 0)} />}
+      {keys.opacity && <NumRow label="Opacity %" prop={keys.opacity} value={val(keys.opacity, 100)} min={0} onChange={v => set(keys.opacity)(Math.max(0, Math.min(100, +v || 0)))} />}
       {keys.flipH  && <Switch label="Flip horizontal" checked={!!node[keys.flipH]} onChange={set(keys.flipH)} />}
       {keys.flipV  && <Switch label="Flip vertical"   checked={!!node[keys.flipV]} onChange={set(keys.flipV)} />}
       {extras}

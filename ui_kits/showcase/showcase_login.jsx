@@ -188,6 +188,14 @@ function LoginPage() {
               <ComponentsUsed list={['Input', 'Button', 'IconButton', 'Checkbox', 'Switch', 'Tabs', 'Tooltip', 'Toast', 'Badge', 'Card', 'Avatar']} />
             </div>
           </Reveal>
+
+          <Reveal delay={520}>
+            <div style={{ marginTop: 16, display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5, color: 'var(--text-muted)' }}>
+              <Ic n="layout-grid" s={14} />
+              <span>Just browsing?</span>
+              <a href="#/menus" className="sc-link" onClick={(e) => { e.preventDefault(); go('/menus'); }}>Explore 9 menu styles</a>
+            </div>
+          </Reveal>
         </div>
       </div>
 
