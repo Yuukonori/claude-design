@@ -17,15 +17,12 @@ window.api = (function () {
     return data;
   }
   return {
-    // auth
+    // auth (GitHub OAuth — sign-in is a full-page redirect to /api/auth/github, not fetch)
     me: () => req('GET', '/api/auth/me'),
-    register: (b) => req('POST', '/api/auth/register', b),
-    login: (b) => req('POST', '/api/auth/login', b),
     logout: () => req('POST', '/api/auth/logout', {}),
-    // plans / subscription / invoices
+    // plans / subscription / invoices (view-only)
     plans: () => req('GET', '/api/plans'),
     subscription: () => req('GET', '/api/subscription'),
-    subscribe: (b) => req('POST', '/api/subscription', b),
     invoices: () => req('GET', '/api/invoices'),
     // projects
     projects: () => req('GET', '/api/projects'),
@@ -45,6 +42,10 @@ window.api = (function () {
     removeMember: (id) => req('DELETE', '/api/team/' + id),
     // account
     updateAccount: (b) => req('PUT', '/api/account', b),
-    updatePassword: (b) => req('PUT', '/api/account/password', b),
+    // admin
+    adminStats: () => req('GET', '/api/admin/stats'),
+    adminUsers: () => req('GET', '/api/admin/users'),
+    adminSetPlan: (id, plan_id) => req('PUT', '/api/admin/users/' + id + '/plan', { plan_id }),
+    adminDeleteUser: (id) => req('DELETE', '/api/admin/users/' + id),
   };
 })();

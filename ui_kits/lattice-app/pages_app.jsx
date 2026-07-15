@@ -1,4 +1,4 @@
-/* global React, AppShell, StatCard, ProjectCard, DataTable, EmptyState, Field, Ic, api, navigate, useAuth, toast */
+/* global React, AppShell, StatCard, ProjectCard, DataTable, EmptyState, Field, Ic, GitHubMark, api, navigate, useAuth, toast */
 
 function openEditor(id) { window.location.href = '/ui_kits/lattice/?project=' + id; }
 
@@ -100,35 +100,34 @@ function Projects() {
 window.Projects = Projects;
 
 function Account() {
-  const { Button } = window.LatticeDesignSystem_e801cb;
+  const { Button, Avatar } = window.LatticeDesignSystem_e801cb;
   const { user, refresh } = useAuth();
-  const [profile, setProfile] = React.useState({ name: user.name, email: user.email });
-  const [pw, setPw] = React.useState({ current: '', next: '' });
-  const [busy, setBusy] = React.useState('');
+  const [name, setName] = React.useState(user.name || '');
+  const [busy, setBusy] = React.useState(false);
 
   const saveProfile = async () => {
-    setBusy('profile');
-    try { await api.updateAccount(profile); await refresh(); toast({ tone: 'success', title: 'Profile saved' }); }
-    catch (ex) { toast({ tone: 'warning', title: 'Failed', message: ex.message }); } finally { setBusy(''); }
-  };
-  const savePw = async () => {
-    setBusy('pw');
-    try { await api.updatePassword(pw); setPw({ current: '', next: '' }); toast({ tone: 'success', title: 'Password updated' }); }
-    catch (ex) { toast({ tone: 'warning', title: 'Failed', message: ex.message }); } finally { setBusy(''); }
+    setBusy(true);
+    try { await api.updateAccount({ name }); await refresh(); toast({ tone: 'success', title: 'Profile saved' }); }
+    catch (ex) { toast({ tone: 'warning', title: 'Failed', message: ex.message }); } finally { setBusy(false); }
   };
 
   return (
     <AppShell active="/account" user={user} title="Account">
       <div style={{ display: 'flex', flexDirection: 'column', gap: 20, maxWidth: 820, width: '100%', margin: '0 auto' }}>
-        <Section title="Profile" desc="Your name and email across Lattice.">
-          <Field label="Full name" value={profile.name} onChange={e => setProfile(p => ({ ...p, name: e.target.value }))} />
-          <Field label="Email" type="email" value={profile.email} onChange={e => setProfile(p => ({ ...p, email: e.target.value }))} />
-          <div><Button variant="solid" size="sm" disabled={busy === 'profile'} onClick={saveProfile}>Save profile</Button></div>
+        <Section title="Profile" desc="Your display name across Lattice.">
+          <Field label="Display name" value={name} onChange={e => setName(e.target.value)} />
+          <div><Button variant="solid" size="sm" disabled={busy} onClick={saveProfile}>Save profile</Button></div>
         </Section>
-        <Section title="Password" desc="Use at least 8 characters.">
-          <Field label="Current password" type="password" value={pw.current} onChange={e => setPw(p => ({ ...p, current: e.target.value }))} />
-          <Field label="New password" type="password" value={pw.next} onChange={e => setPw(p => ({ ...p, next: e.target.value }))} />
-          <div><Button variant="outline" size="sm" disabled={busy === 'pw'} onClick={savePw}>Update password</Button></div>
+        <Section title="Connected account" desc="You sign in with GitHub. These details come from your GitHub profile.">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <Avatar name={user.name || user.github_login || '?'} src={user.avatar_url} size="md" />
+            <div style={{ minWidth: 0 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, fontWeight: 600 }}>
+                <GitHubMark s={15} />@{user.github_login || '—'}
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', marginTop: 2 }}>{user.email || 'No public email'}</div>
+            </div>
+          </div>
         </Section>
       </div>
     </AppShell>
@@ -168,7 +167,7 @@ function Billing() {
             </div>
             {sub && sub.current_period_end && <div style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', marginTop: 4 }}>Renews {new Date(sub.current_period_end).toLocaleDateString()} · {sub.billing_cycle}</div>}
           </div>
-          <Button variant="outline" size="sm" onClick={() => navigate('/pricing')}>Change plan</Button>
+          <span style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>Managed by Lattice</span>
         </div>
 
         <div>

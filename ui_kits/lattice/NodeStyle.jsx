@@ -91,6 +91,42 @@ function nodeFx(node) {
   return Object.keys(s).length ? s : null;
 }
 
+// --- Clipping mask -------------------------------------------------------------------------------
+// A masked node (node.maskId → a shape node) is clipped to that shape's silhouette. Both nodes live
+// in the same canvas coordinate space, so the mask becomes a CSS clip-path expressed in the CONTENT
+// node's own box (pixels from its top-left). Non-destructive: move/reshape the mask and the content
+// re-clips live. Supports ellipse/circle, rounded rects & frames, and the polygonal shape kinds.
+function clipPathForMask(content, mask) {
+  if (!content || !mask) return null;
+  const R = v => Math.round(v * 100) / 100;
+  const dx = (mask.x || 0) - (content.x || 0);
+  const dy = (mask.y || 0) - (content.y || 0);
+  const mw = mask.w || 0, mh = mask.h || 0;
+  const kind = window.kindOf ? window.kindOf(mask) : (mask.kind || 'frame');
+
+  if (kind === 'ellipse') {
+    return `ellipse(${R(mw / 2)}px ${R(mh / 2)}px at ${R(dx + mw / 2)}px ${R(dy + mh / 2)}px)`;
+  }
+  const POLY = window.POLY_KINDS;
+  if (POLY && POLY.has(kind) && window.shapePoints) {
+    const pts = (window.shapePoints(kind, mask) || '').trim();
+    if (pts) {
+      const poly = pts.split(/\s+/).map(pair => {
+        const c = pair.split(',');
+        return `${R(dx + (parseFloat(c[0]) / 100) * mw)}px ${R(dy + (parseFloat(c[1]) / 100) * mh)}px`;
+      }).join(', ');
+      return `polygon(${poly})`;
+    }
+  }
+  // rect / frame / card / any container → inset to the mask box, keeping the mask's own corner
+  // radius (so a big radius on a square mask — i.e. a "circle" made with radius — Just Works).
+  const right = (content.w || 0) - (dx + mw);
+  const bottom = (content.h || 0) - (dy + mh);
+  const rad = radiusCss(mask);
+  const inset = `inset(${R(dy)}px ${R(right)}px ${R(bottom)}px ${R(dx)}px`;
+  return rad ? `${inset} round ${rad})` : `${inset})`;
+}
+
 // --- Text layer styles (Photoshop-ish): stroke, shadows/glow, gradient fill, decoration ---------
 // Kinds that render text somewhere. `textFx` only emits *inheritable* properties, so it can be
 // spread on whatever element a kind already returns and the label inside (even a DS component)
@@ -362,6 +398,8 @@ const EFFECT_PRESETS = {
 window.gradientCss = gradientCss;
 window.fillBg = fillBg;
 window.nodeFx = nodeFx;
+window.radiusCss = radiusCss;
+window.clipPathForMask = clipPathForMask;
 window.hasAppearance = hasAppearance;
 window.EFFECT_PRESETS = EFFECT_PRESETS;
 window.textFx = textFx;

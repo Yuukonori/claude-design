@@ -5,6 +5,7 @@ const cookieParser = require('cookie-parser');
 const { initSchema } = require('./db');
 
 const app = express();
+app.set('trust proxy', true); // behind Render's TLS proxy: honor x-forwarded-proto for OAuth redirects
 app.use(express.json({ limit: '4mb' }));
 app.use(cookieParser());
 
@@ -16,6 +17,7 @@ app.use('/api/library', require('./routes/library'));
 app.use('/api', require('./routes/billing')); // /api/plans, /api/subscription, /api/invoices
 app.use('/api/team', require('./routes/team'));
 app.use('/api/account', require('./routes/account'));
+app.use('/api/admin', require('./routes/admin'));
 app.use('/api/proxy', require('./routes/proxy'));
 
 // Unknown API route -> JSON 404 (before static, so /api/* never serves files)
@@ -29,8 +31,20 @@ app.use('/api', (err, req, res, next) => { // eslint-disable-line no-unused-vars
 
 // --- Static (serve the whole repo: styles.css, _ds_bundle.js, ui_kits/**, assets/**) ---
 const ROOT = path.join(__dirname, '..');
+const DEV = process.env.NODE_ENV !== 'production';
 app.get('/', (req, res) => res.redirect('/ui_kits/lattice-app/'));
-app.use(express.static(ROOT, { extensions: ['html'] }));
+app.use(express.static(ROOT, {
+  extensions: ['html'],
+  // In local dev the editor loads ~25 in-browser-transpiled source files (no build step). Browsers
+  // cache them aggressively, so after an edit you can end up running a stale App.jsx alongside fresh
+  // siblings — the editor then "breaks after an update" until a hard refresh. Disable caching for
+  // source files in dev so a plain reload always runs the latest code. Production (Render) is untouched.
+  setHeaders: (res, filePath) => {
+    if (DEV && /\.(jsx|js|mjs|html|css)$/i.test(filePath)) {
+      res.setHeader('Cache-Control', 'no-store, must-revalidate');
+    }
+  },
+}));
 
 const PORT = +(process.env.PORT || 5050);
 initSchema()

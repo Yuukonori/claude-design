@@ -7,6 +7,16 @@ function Ic({ n, s = 16, style }) {
 }
 window.Ic = Ic;
 
+// Inline GitHub mark — Lucide's brand glyphs are unreliable in this build, so we ship our own.
+function GitHubMark({ s = 16, style }) {
+  return (
+    <svg width={s} height={s} viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" style={{ display: 'block', ...style }}>
+      <path fillRule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
+    </svg>
+  );
+}
+window.GitHubMark = GitHubMark;
+
 function Container({ children, style, wide, full }) {
   return <div style={{ width: '100%', maxWidth: full ? 'none' : (wide ? 1240 : 1120), margin: '0 auto', padding: full ? '0 32px' : '0 24px', ...style }}>{children}</div>;
 }
@@ -55,6 +65,7 @@ window.Wordmark = Wordmark;
 
 function Navbar({ user }) {
   const { Button, Avatar } = window.LatticeDesignSystem_e801cb;
+  const { loginWithGitHub } = useAuth();
   return (
     <header style={{ position: 'sticky', top: 0, zIndex: 50, borderBottom: '1px solid var(--border-subtle)', background: 'rgba(10,10,12,0.72)', backdropFilter: 'var(--blur-overlay)' }}>
       <Container full style={{ height: 62, display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -68,13 +79,13 @@ function Navbar({ user }) {
             <>
               <Button variant="ghost" size="sm" onClick={() => navigate('/projects')}>Dashboard</Button>
               <button type="button" onClick={() => navigate('/account')} title={user.name} style={{ border: 0, background: 'none', cursor: 'pointer', padding: 0 }}>
-                <Avatar name={user.name} size="sm" />
+                <Avatar name={user.name} src={user.avatar_url} size="sm" />
               </button>
             </>
           ) : (
             <>
-              <Button variant="ghost" size="sm" onClick={() => navigate('/login')}>Sign in</Button>
-              <Button variant="solid" size="sm" onClick={() => navigate('/register')} iconRight={<Ic n="arrow-right" s={15} />}>Get started</Button>
+              <Button variant="ghost" size="sm" onClick={loginWithGitHub}>Sign in</Button>
+              <Button variant="solid" size="sm" onClick={loginWithGitHub} iconLeft={<GitHubMark s={15} />}>Continue with GitHub</Button>
             </>
           )}
         </div>
@@ -177,10 +188,16 @@ function PlanToggle({ cycle, onChange }) {
 }
 window.PlanToggle = PlanToggle;
 
-function PricingCard({ plan, cycle, featured, current, onChoose }) {
+function PricingCard({ plan, cycle, featured, current, locked, loggedIn, onChoose }) {
   const { Button, Badge } = window.LatticeDesignSystem_e801cb;
   const [hover, setHover] = React.useState(false);
   const price = cycle === 'annual' ? Math.round(plan.price_annual / 12) : plan.price_monthly;
+  const isFree = plan.price_monthly === 0;
+  let cta;
+  if (current) cta = <Button variant="outline" size="md" fullWidth disabled>Current plan</Button>;
+  else if (locked) cta = <Button variant="outline" size="md" fullWidth disabled iconLeft={<Ic n="lock" s={14} />}>View only</Button>;
+  else if (isFree && loggedIn) cta = <Button variant="outline" size="md" fullWidth disabled>Included</Button>;
+  else cta = <Button variant={featured ? 'solid' : 'outline'} size="md" fullWidth onClick={() => onChoose(plan)}>{isFree ? 'Start free' : 'Choose ' + plan.name}</Button>;
   return (
     <div onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
       style={{
@@ -202,9 +219,7 @@ function PricingCard({ plan, cycle, featured, current, onChoose }) {
       <div style={{ fontSize: 11.5, color: 'var(--text-disabled)', fontFamily: 'var(--font-mono)', marginBottom: 18, minHeight: 15 }}>
         {cycle === 'annual' && plan.price_annual > 0 ? `$${plan.price_annual} billed yearly` : plan.price_monthly === 0 ? 'Free forever' : 'Billed monthly'}
       </div>
-      <Button variant={featured ? 'solid' : 'outline'} size="md" fullWidth disabled={current} onClick={() => onChoose(plan)}>
-        {current ? 'Current plan' : plan.price_monthly === 0 ? 'Start free' : 'Choose ' + plan.name}
-      </Button>
+      {cta}
       <div style={{ marginTop: 20, display: 'flex', flexDirection: 'column', gap: 10 }}>
         {(plan.features || []).map((f, i) => (
           <div key={i} style={{ display: 'flex', gap: 9, fontSize: 13, color: 'var(--text-secondary)' }}>
@@ -303,7 +318,7 @@ function AvatarMenu({ user }) {
   return (
     <div ref={ref} style={{ position: 'relative' }}>
       <button type="button" onClick={() => setOpen(o => !o)} title={user.name} style={{ border: 0, background: 'none', cursor: 'pointer', padding: 0, display: 'flex' }}>
-        <Avatar name={user.name} size="sm" />
+        <Avatar name={user.name} src={user.avatar_url} size="sm" />
       </button>
       {open && (
         <div style={{ position: 'absolute', top: '110%', right: 0, minWidth: 200, background: 'var(--surface-raised)', border: '1px solid var(--border-default)', boxShadow: 'var(--shadow-overlay)', zIndex: 300, padding: 4 }}>
@@ -314,6 +329,7 @@ function AvatarMenu({ user }) {
           {item('user', 'Account', () => navigate('/account'))}
           {item('credit-card', 'Billing', () => navigate('/billing'))}
           {item('users', 'Team', () => navigate('/team'))}
+          {user.is_admin && item('shield', 'Admin', () => navigate('/admin'))}
           <div style={{ height: 1, background: 'var(--border-subtle)', margin: '4px 0' }} />
           {item('log-out', 'Sign out', () => logout(), true)}
         </div>
@@ -330,6 +346,7 @@ function AppShell({ active, user, title, actions, children }) {
     ['/billing', 'credit-card', 'Billing'],
     ['/account', 'user', 'Account'],
   ];
+  if (user && user.is_admin) workspaceNav.push(['/admin', 'shield', 'Admin']);
   const marketNav = [
     ['/market', 'store', 'Market'],
     ['/plugins', 'blocks', 'Plugins'],
@@ -393,6 +410,12 @@ function ProjectCard({ project, onOpen, onRename, onDelete }) {
     const t = setTimeout(() => document.addEventListener('mousedown', on), 0);
     return () => { clearTimeout(t); document.removeEventListener('mousedown', on); };
   }, [menu]);
+  // Cards mount after the async projects fetch, missing Shell's one-shot icon swap; swap our own
+  // glyphs (the ⋯ button + menu items) after each render. Idempotent — skips already-painted icons.
+  React.useEffect(() => {
+    const t = setTimeout(() => window.renderLucideIcons && window.renderLucideIcons(ref.current), 0);
+    return () => clearTimeout(t);
+  });
   const updated = new Date(project.updated_at);
   return (
     <div style={{ border: '1px solid var(--border-subtle)', background: 'var(--surface-card)', display: 'flex', flexDirection: 'column', cursor: 'pointer' }}
@@ -409,7 +432,10 @@ function ProjectCard({ project, onOpen, onRename, onDelete }) {
           <div style={{ fontSize: 11.5, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>edited {updated.toLocaleDateString()}</div>
         </div>
         <div ref={ref} style={{ position: 'relative' }} onClick={e => e.stopPropagation()}>
-          <button type="button" title="More" onClick={() => setMenu(m => !m)} style={{ border: 0, background: 'transparent', cursor: 'pointer', color: 'var(--text-muted)', padding: 4, display: 'flex' }}>
+          <button type="button" title="More" onClick={() => setMenu(m => !m)}
+            style={{ border: '1px solid var(--border-subtle)', borderRadius: 6, background: menu ? 'var(--surface-hover)' : 'transparent', cursor: 'pointer', color: menu ? 'var(--text-primary)' : 'var(--text-secondary)', padding: 4, display: 'flex' }}
+            onMouseEnter={e => { e.currentTarget.style.background = 'var(--surface-hover)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
+            onMouseLeave={e => { if (!menu) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-secondary)'; } }}>
             <Ic n="more-horizontal" s={16} />
           </button>
           {menu && (

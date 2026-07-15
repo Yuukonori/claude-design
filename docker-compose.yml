@@ -1,0 +1,45 @@
+# Local full-stack: builds the app image and runs it against a Postgres container.
+#   docker compose up --build      → http://localhost:5050/ui_kits/lattice-app/
+#   docker compose down            → stop (add -v to also wipe the DB volume)
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lattice
+      POSTGRES_PASSWORD: lattice
+      POSTGRES_DB: lattice
+    ports:
+      - "5432:5432"          # exposed so you can inspect the DB from the host; optional
+    volumes:
+      - lattice_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lattice -d lattice"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy   # wait until Postgres accepts connections
+    environment:
+      NODE_ENV: production
+      PORT: 5050
+      # Single connection string → the app's db.js prefers this over the discrete DB_* vars.
+      DATABASE_URL: postgres://lattice:lattice@db:5432/lattice
+      DB_SSL: "false"                # the local Postgres container does not speak TLS
+      JWT_SECRET: "dev-only-change-me-to-a-long-random-string"
+      # GitHub sign-in. For local testing, register a separate OAuth App with callback
+      # http://localhost:5050/api/auth/github/callback and put its credentials here.
+      APP_URL: "http://localhost:5050"
+      GITHUB_CLIENT_ID: "${GITHUB_CLIENT_ID:-}"
+      GITHUB_CLIENT_SECRET: "${GITHUB_CLIENT_SECRET:-}"
+      ADMIN_GITHUB_LOGIN: "Yuukonori"
+    ports:
+      - "5050:5050"
+
+volumes:
+  lattice_pgdata:

@@ -20,30 +20,10 @@ router.get('/subscription', requireAuth, async (req, res) => {
   res.json({ subscription: r.rows[0] || null });
 });
 
-router.post('/subscription', requireAuth, async (req, res) => {
-  const planId = req.body?.plan_id;
-  const cycle = req.body?.billing_cycle === 'annual' ? 'annual' : 'monthly';
-  const p = await query('SELECT id, name, price_monthly, price_annual FROM plans WHERE id=$1', [planId]);
-  if (!p.rowCount) return res.status(400).json({ error: 'Unknown plan.' });
-  const plan = p.rows[0];
-
-  await query(`UPDATE subscriptions SET status='canceled' WHERE user_id=$1 AND status='active'`, [req.user.id]);
-  const interval = cycle === 'annual' ? "interval '1 year'" : "interval '30 days'";
-  const s = await query(
-    `INSERT INTO subscriptions (user_id, plan_id, status, billing_cycle, current_period_end)
-     VALUES ($1,$2,'active',$3, now() + ${interval})
-     RETURNING id, plan_id, status, billing_cycle, current_period_end`,
-    [req.user.id, planId, cycle]
-  );
-
-  const amount = cycle === 'annual' ? plan.price_annual : plan.price_monthly;
-  if (amount > 0) {
-    await query(
-      `INSERT INTO invoices (user_id, plan_id, amount, period, status) VALUES ($1,$2,$3,$4,'paid')`,
-      [req.user.id, planId, amount, cycle]
-    );
-  }
-  res.json({ subscription: { ...s.rows[0], name: plan.name } });
+// Self-serve plan changes are disabled — plans are view-only and every account is on Free.
+// (An admin can override a user's plan via /api/admin/users/:id/plan.)
+router.post('/subscription', requireAuth, (req, res) => {
+  res.status(403).json({ error: 'Plan changes are disabled. Every account is on the Free plan.' });
 });
 
 router.get('/invoices', requireAuth, async (req, res) => {

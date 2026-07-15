@@ -54,9 +54,14 @@ function jsxText(t) { return t ? '{' + JSON.stringify(t) + '}' : ''; }
 // Faithful-enough inline style for a node, reusing the editor's own resolvers where available.
 // Geometry (position/left/top/width/height) is intentionally NOT baked here — it varies per device
 // and is applied at runtime by __g(table, layer) in the generated page (see nodeGeomTable).
-function nodeBaseStyleObj(n) {
+function nodeBaseStyleObj(n, maskNode) {
   const fx = (window.nodeFx && window.nodeFx(n)) || {};
   const style = Object.assign({}, fx);
+  // A clipped layer bakes its mask as a clip-path (from the base/desktop geometry of both boxes).
+  if (maskNode && window.clipPathForMask) {
+    const cp = window.clipPathForMask(n, maskNode);
+    if (cp) { style.clipPath = cp; style.WebkitClipPath = cp; }
+  }
   const bg = (window.fillBg && window.fillBg(n)) || n.fillColor;
   if (bg) style.background = bg;
   if (n.textColor) style.color = n.textColor;
@@ -185,12 +190,18 @@ function genPageTsx(page, comp) {
   // (position:absolute; inset:0); App.tsx sizes & scales that frame per device. A node that carries
   // interactions or an animation state is wrapped in <LNode> (with a baked NODEn data object) so the
   // runtime can attach handlers + play its animation.
+  // Clipping masks: the mask shape isn't emitted (it only defined the clip, now baked into each
+  // clipped layer's clip-path); every layer pointing at it carries that clip in its base style.
+  const maskById = {}; nodes.forEach(n => { maskById[n.id] = n; });
+  const maskNodeIds = new Set(nodes.filter(n => n.maskId).map(n => n.maskId));
   const geomDecls = [];
   let usesLNode = false;
   const body = nodes.map((n, i) => {
+    if (maskNodeIds.has(n.id)) return null;
     const gvar = 'G' + i;
     geomDecls.push('const ' + gvar + ' = ' + JSON.stringify(nodeGeomTable(n)) + ';');
-    const styleExpr = '{ ...(' + objToJs(nodeBaseStyleObj(n)) + '), ...__g(' + gvar + ', layer) }';
+    const maskNode = n.maskId ? maskById[n.maskId] : null;
+    const styleExpr = '{ ...(' + objToJs(nodeBaseStyleObj(n, maskNode)) + '), ...__g(' + gvar + ', layer) }';
     const el = nodeToTsx(n, resolveImg, styleExpr);
     if (!nodeHasBehavior(n)) return el;
     usesLNode = true;

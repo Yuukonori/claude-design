@@ -74,13 +74,73 @@ function WorkflowView({
     });
     setSelIds([]);
   };
+  const newEdgeId = () => 'we_' + Math.random().toString(36).slice(2, 7);
   const addNode = (type) => {
     if (!wf) return;
     const r = vpRef.current.getBoundingClientRect(); const v = viewRef.current;
-    const x = (r.width / 2 - v.x) / v.z - CARD_W / 2 + (Math.random() * 40 - 20);
-    const y = (r.height / 2 - v.y) / v.z - 30 + (Math.random() * 40 - 20);
+    // If exactly one node is selected we place the new node just to its right and auto-wire them
+    // (inserting into the chain if the selected node already pointed somewhere). Otherwise drop it
+    // near the centre of the current view.
+    const selNode = (selIds.length === 1) ? wf.nodes.find(n => n.id === selIds[0]) : null;
+    let x, y;
+    if (selNode) { x = selNode.x + CARD_W + 64; y = selNode.y; }
+    else {
+      x = (r.width / 2 - v.x) / v.z - CARD_W / 2 + (Math.random() * 40 - 20);
+      y = (r.height / 2 - v.y) / v.z - 30 + (Math.random() * 40 - 20);
+    }
     const n = newWorkflowNode(type, x, y);
-    patchWf({ nodes: [...wf.nodes, n] }); selectOnly(n.id);
+    let edges = wf.edges || [];
+    if (selNode) {
+      const outs = workflowOutPorts(selNode);
+      if (outs.length === 1) { // only auto-wire single-output nodes (not branches)
+        const port = outs[0].port;
+        const prev = edges.find(e => e.from === selNode.id && (e.fromPort || 'next') === port);
+        edges = edges.filter(e => !(e.from === selNode.id && (e.fromPort || 'next') === port));
+        edges = [...edges, { id: newEdgeId(), from: selNode.id, fromPort: port, to: n.id }];
+        const nOuts = workflowOutPorts(n);
+        if (prev && nOuts.length === 1) edges = [...edges, { id: newEdgeId(), from: n.id, fromPort: nOuts[0].port, to: prev.to }];
+      }
+    }
+    patchWf({ nodes: [...wf.nodes, n], edges }); selectOnly(n.id);
+  };
+  // Duplicate nodes (Trigger excluded — one per workflow). Offsets the clones and re-copies any edges
+  // that live entirely inside the duplicated set, so a copied sub-flow stays wired together.
+  const duplicateNodes = (ids) => {
+    const c = cbRef.current; if (!c.wf) return;
+    const idMap = {};
+    const clones = c.wf.nodes.filter(n => ids.includes(n.id) && n.type !== 'trigger').map(n => {
+      const nid = 'wn_' + Math.random().toString(36).slice(2, 7); idMap[n.id] = nid;
+      return { ...n, id: nid, x: n.x + 34, y: n.y + 34 };
+    });
+    if (!clones.length) return;
+    const newEdges = (c.wf.edges || []).filter(e => idMap[e.from] && idMap[e.to])
+      .map(e => ({ id: newEdgeId(), from: idMap[e.from], fromPort: e.fromPort, to: idMap[e.to] }));
+    c.onChangeWorkflow(c.wf.id, { nodes: [...c.wf.nodes, ...clones], edges: [...(c.wf.edges || []), ...newEdges] });
+    setSelIds(clones.map(n => n.id));
+  };
+
+  // --- zoom / fit controls (share the same view model as wheel-zoom) ---
+  const zoomBy = (factor) => {
+    if (!vpRef.current) return;
+    const r = vpRef.current.getBoundingClientRect(); const v = viewRef.current;
+    const px = r.width / 2, py = r.height / 2;
+    const z = Math.min(2.5, Math.max(0.3, v.z * factor)); const k = z / v.z;
+    setV({ x: px - (px - v.x) * k, y: py - (py - v.y) * k, z });
+  };
+  const resetZoom = () => {
+    if (!vpRef.current) return;
+    const r = vpRef.current.getBoundingClientRect(); const v = viewRef.current;
+    const px = r.width / 2, py = r.height / 2; const k = 1 / v.z;
+    setV({ x: px - (px - v.x) * k, y: py - (py - v.y) * k, z: 1 });
+  };
+  const fitAll = () => {
+    if (!wf || !wf.nodes.length || !vpRef.current) return;
+    const r = vpRef.current.getBoundingClientRect();
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    wf.nodes.forEach(n => { minX = Math.min(minX, n.x); minY = Math.min(minY, n.y); maxX = Math.max(maxX, n.x + CARD_W); maxY = Math.max(maxY, n.y + cardH(n)); });
+    const pad = 70; const w = maxX - minX + pad * 2, h = maxY - minY + pad * 2;
+    const z = Math.min(1.4, Math.max(0.3, Math.min(r.width / w, r.height / h)));
+    setV({ x: (r.width - (minX + maxX) * z) / 2, y: (r.height - (minY + maxY) * z) / 2, z });
   };
 
   // document-level move/connect/pan listeners (registered once)
@@ -158,6 +218,9 @@ function WorkflowView({
       if ((e.key === 'Delete' || e.key === 'Backspace') && !typing() && selIdsRef.current.length) {
         e.preventDefault(); deleteNodes(selIdsRef.current); return;
       }
+      if ((e.key === 'd' || e.key === 'D') && (e.metaKey || e.ctrlKey) && !typing() && selIdsRef.current.length) {
+        e.preventDefault(); duplicateNodes(selIdsRef.current); return;
+      }
       if (e.key === 'Escape' && !typing()) { setSelIds([]); }
     };
     const ku = (e) => { if (e.code === 'Space') { spaceRef.current = false; setSpaceHeld(false); } };
@@ -200,6 +263,14 @@ function WorkflowView({
         return a ? `${t.label} · ${a.name}` : 'pick a component + animation';
       }
       case 'playPageAnim': { const p = (pages || []).find(x => x.id === n.pageId); return p ? `↻ ${p.name}` : '↻ current page'; }
+      case 'compute':  { const v = merged.find(x => x.id === n.target); const sym = { '+': '+', '-': '−', '*': '×', '/': '÷', min: 'min', max: 'max', concat: '&' }[n.op] || n.op; return `${n.a || 'a'} ${sym} ${n.b || 'b'}${v ? ` → ${v.name}` : ''}`; }
+      case 'random':   { const v = merged.find(x => x.id === n.target); const src = n.mode === 'list' ? `pick of [${n.list || '…'}]` : `${n.min ?? 0}–${n.max ?? 100}`; return `${src}${v ? ` → ${v.name}` : ''}`; }
+      case 'storage':  return `${n.mode || 'set'} “${n.key || '…'}”`;
+      case 'confirm':  return n.message || 'ask yes / no';
+      case 'runWorkflow': { const w = (workflows || []).find(x => x.id === n.workflowId); return w ? `↳ ${w.name}` : 'pick a workflow'; }
+      case 'delay':    return `wait ${n.ms || 0}ms`;
+      case 'log':      return n.message || 'log a message';
+      case 'stop':     return 'end workflow';
       default: return '';
     }
   };
@@ -231,14 +302,20 @@ function WorkflowView({
       {/* ---- CENTER: node canvas ---- */}
       <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
         <div style={{ flex: 'none', display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderBottom: '1px solid var(--border-subtle)', background: 'var(--surface)' }}>
-          <span style={{ fontSize: 11, color: 'var(--text-muted)', marginRight: 4 }}>Add node</span>
-          {Object.keys(WORKFLOW_NODE_TYPES).filter(t => t !== 'trigger').map(t => (
-            <button key={t} type="button" disabled={!wf} onClick={() => addNode(t)} title={WORKFLOW_NODE_TYPES[t].label}
-              style={{ display: 'inline-flex', alignItems: 'center', gap: 5, height: 26, padding: '0 9px', borderRadius: 5, border: '1px solid var(--border-default)', background: 'transparent', color: wf ? 'var(--text-secondary)' : 'var(--text-disabled)', cursor: wf ? 'pointer' : 'default', fontSize: 11.5 }}>
-              <i data-lucide={WORKFLOW_NODE_TYPES[t].icon} style={{ width: 13, height: 13 }}></i>{WORKFLOW_NODE_TYPES[t].label}
+          <AddNodeMenu onAdd={addNode} disabled={!wf} />
+          {sel && sel.type !== 'trigger' && (
+            <button type="button" onClick={() => duplicateNodes([sel.id])} title="Duplicate selected node (Ctrl+D)"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 5, height: 28, padding: '0 10px', borderRadius: 6, border: '1px solid var(--border-default)', background: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 12 }}>
+              <i data-lucide="copy" style={{ width: 13, height: 13 }}></i>Duplicate
             </button>
-          ))}
-          <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--text-disabled)' }}>drag empty area to select · drag a card to move · drag a ● to connect · Del removes · space/middle-drag pans · ⌘/Ctrl+scroll zooms · {Math.round(view.z * 100)}%</span>
+          )}
+          <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--text-disabled)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>drag a ● to connect · Del removes · Ctrl+D duplicates · space/middle-drag pans</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 2, flex: 'none', border: '1px solid var(--border-default)', borderRadius: 6, padding: 2 }}>
+            <button type="button" title="Zoom out" onClick={() => zoomBy(1 / 1.15)} disabled={!wf} style={zoomBtn}><i data-lucide="zoom-out" style={{ width: 13, height: 13 }}></i></button>
+            <button type="button" title="Reset zoom to 100%" onClick={resetZoom} disabled={!wf} style={{ ...zoomBtn, width: 42, fontSize: 10.5, fontFamily: 'var(--font-mono)' }}>{Math.round(view.z * 100)}%</button>
+            <button type="button" title="Zoom in" onClick={() => zoomBy(1.15)} disabled={!wf} style={zoomBtn}><i data-lucide="zoom-in" style={{ width: 13, height: 13 }}></i></button>
+            <button type="button" title="Fit all nodes" onClick={fitAll} disabled={!wf} style={zoomBtn}><i data-lucide="maximize" style={{ width: 13, height: 13 }}></i></button>
+          </div>
         </div>
 
         <div ref={vpRef} className="lattice-grid"
@@ -278,16 +355,17 @@ function WorkflowView({
 
               {wf.nodes.map(node => {
                 const n = posOf(node); const meta = WORKFLOW_NODE_TYPES[n.type] || {}; const ports = workflowOutPorts(n);
-                const active = selIds.includes(n.id); const h = cardH(n);
+                const active = selIds.includes(n.id); const h = cardH(n); const muted = !!n.disabled;
                 return (
                   <div key={n.id} onMouseDown={startCardDrag(n)} onClick={e => { e.stopPropagation(); if (!movedRef.current) selectOnly(n.id); }}
-                    style={{ position: 'absolute', left: n.x, top: n.y, width: CARD_W, height: h, boxSizing: 'border-box',
-                      border: '1px solid ' + (active ? 'var(--blue-base)' : 'var(--border-default)'), borderRadius: 8, background: 'var(--surface)',
+                    style={{ position: 'absolute', left: n.x, top: n.y, width: CARD_W, height: h, boxSizing: 'border-box', opacity: muted ? 0.55 : 1,
+                      border: '1px ' + (muted ? 'dashed ' : 'solid ') + (active ? 'var(--blue-base)' : 'var(--border-default)'), borderRadius: 8, background: 'var(--surface)',
                       boxShadow: active ? '0 0 0 2px var(--blue-base)44' : 'var(--shadow-sm, 0 1px 2px rgba(0,0,0,.2))', cursor: dragRef.current && dragRef.current.ids.includes(n.id) ? 'grabbing' : 'grab', userSelect: 'none' }}>
                     <div style={{ position: 'absolute', left: -1, top: 8, bottom: 8, width: 3, borderRadius: 3, background: meta.accent || 'var(--border-strong)' }}></div>
-                    <div style={{ height: 34, display: 'flex', alignItems: 'center', gap: 7, padding: '0 8px 0 12px', borderBottom: '1px solid var(--border-subtle)' }}>
+                    <div style={{ height: 34, display: 'flex', alignItems: 'center', gap: 7, padding: '0 6px 0 12px', borderBottom: '1px solid var(--border-subtle)' }}>
                       <i data-lucide={meta.icon || 'box'} style={{ width: 14, height: 14, color: meta.accent || 'var(--text-secondary)', flex: 'none' }}></i>
-                      <span style={{ flex: 1, fontSize: 12.5, fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{meta.label || n.type}</span>
+                      <span style={{ flex: 1, fontSize: 12.5, fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={n.title ? `${n.title} · ${meta.label}` : meta.label}>{n.title || meta.label || n.type}</span>
+                      {n.type !== 'trigger' && <button type="button" title={muted ? 'Enable node' : 'Mute node (skip at run)'} onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); updateNode(n.id, { disabled: !muted }); }} style={miniBtn}><i data-lucide={muted ? 'eye-off' : 'eye'} style={miniIco}></i></button>}
                       {n.type !== 'trigger' && <button type="button" title="Delete node" onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); deleteNode(n.id); }} style={miniBtn}><i data-lucide="x" style={miniIco}></i></button>}
                     </div>
                     <div style={{ padding: '7px 12px', fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{nodeSummary(n)}</div>
@@ -318,8 +396,11 @@ function WorkflowView({
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, padding: 24, textAlign: 'center' }}>
             <i data-lucide="boxes" style={{ width: 20, height: 20, color: 'var(--text-secondary)' }}></i>
             <div style={{ fontFamily: 'var(--font-serif-display)', fontSize: 18, color: 'var(--text-secondary)' }}>{selIds.length} nodes selected</div>
-            <div style={{ fontSize: 12, color: 'var(--text-muted)', maxWidth: 200 }}>Drag to move them together, or delete them. The Trigger node can’t be deleted.</div>
-            <Button variant="danger" size="sm" onClick={() => deleteNodes(selIds)} iconLeft={<i data-lucide="trash-2"></i>}>Delete selected</Button>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', maxWidth: 200 }}>Drag to move them together, duplicate, or delete them. The Trigger node can’t be deleted.</div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <Button variant="outline" size="sm" onClick={() => duplicateNodes(selIds)} iconLeft={<i data-lucide="copy"></i>}>Duplicate</Button>
+              <Button variant="danger" size="sm" onClick={() => deleteNodes(selIds)} iconLeft={<i data-lucide="trash-2"></i>}>Delete</Button>
+            </div>
           </div>
         ) : !sel ? (
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8, padding: 24, textAlign: 'center' }}>
@@ -328,8 +409,9 @@ function WorkflowView({
             <div style={{ fontSize: 12, color: 'var(--text-muted)', maxWidth: 190 }}>Select a node to edit it, drag on an empty area to select several, or add one from the toolbar.</div>
           </div>
         ) : (
-          <NodeConfig node={sel} onChange={patch => updateNode(sel.id, patch)}
-            varOptions={varOptions} merged={merged} pages={pages || []} allPageNodes={allPageNodes} />
+          <NodeConfig node={sel} onChange={patch => updateNode(sel.id, patch)} onDuplicate={() => duplicateNodes([sel.id])} onDelete={() => deleteNode(sel.id)}
+            varOptions={varOptions} merged={merged} pages={pages || []} allPageNodes={allPageNodes}
+            workflows={workflows} currentWfId={wf ? wf.id : null} />
         )}
       </aside>
     </div>
@@ -337,20 +419,32 @@ function WorkflowView({
 }
 
 // ---- node config form ----
-function NodeConfig({ node, onChange, varOptions, merged, pages, allPageNodes }) {
+function NodeConfig({ node, onChange, onDuplicate, onDelete, varOptions, merged, pages, allPageNodes, workflows, currentWfId }) {
   const { Select, Input } = window.LatticeDesignSystem_e801cb;
   const meta = WORKFLOW_NODE_TYPES[node.type] || {};
   const set = (k) => (v) => onChange({ [k]: v });
   const varHint = merged.length ? `Reference variables with {{name}} — e.g. {{${merged[0].name}}}` : 'Create a variable to reference it as {{name}}';
+  const isTrigger = node.type === 'trigger';
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, flex: 1 }}>
-      <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', gap: 8 }}>
-        <i data-lucide={meta.icon || 'box'} style={{ width: 15, height: 15, color: meta.accent || 'var(--text-secondary)' }}></i>
-        <span style={{ fontSize: 13, fontWeight: 600 }}>{meta.label || node.type}</span>
+      <div style={{ padding: '10px 8px 10px 14px', borderBottom: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <i data-lucide={meta.icon || 'box'} style={{ width: 15, height: 15, color: meta.accent || 'var(--text-secondary)', flex: 'none' }}></i>
+        <span style={{ flex: 1, fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{node.title || meta.label || node.type}</span>
+        {!isTrigger && <button type="button" title="Duplicate (Ctrl+D)" onClick={onDuplicate} style={miniBtn}><i data-lucide="copy" style={miniIco}></i></button>}
+        {!isTrigger && <button type="button" title="Delete node" onClick={onDelete} style={miniBtn}><i data-lucide="trash-2" style={miniIco}></i></button>}
       </div>
       <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 12, overflow: 'auto', flex: 1, minHeight: 0 }}>
-        {node.type === 'trigger' && <Note>This node runs when a component action “Run workflow” points at this workflow (attach it on a button in the Design tab).</Note>}
+        {!isTrigger && <>
+          <Field label="Node label (optional)"><Input size="sm" placeholder={meta.label} value={node.title || ''} onChange={e => set('title')(e.target.value)} /></Field>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--text-secondary)', cursor: 'pointer', userSelect: 'none' }}>
+            <input type="checkbox" checked={!node.disabled} onChange={e => set('disabled')(!e.target.checked)} style={{ cursor: 'pointer' }} />
+            Enabled{node.disabled ? <span style={{ fontSize: 10.5, color: 'var(--amber-base)' }}>· muted — skipped at run</span> : null}
+          </label>
+          <div style={{ height: 1, background: 'var(--border-subtle)', margin: '2px 0' }} />
+        </>}
+
+        {isTrigger && <Note>This node runs when a component action “Run workflow” points at this workflow (attach it on a button in the Design tab).</Note>}
 
         {node.type === 'setVar' && <>
           <Field label="Variable"><Select size="sm" options={varOptions} value={node.target || ''} onChange={e => set('target')(e.target.value)} /></Field>
@@ -406,6 +500,62 @@ function NodeConfig({ node, onChange, varOptions, merged, pages, allPageNodes })
           <Field label="Page"><Select size="sm" options={[{ value: '', label: 'Current page' }, ...pages.map(p => ({ value: p.id, label: p.name }))]} value={node.pageId || ''} onChange={e => set('pageId')(e.target.value)} /></Field>
           <Note>Replays that page's scene timeline from 0 — the one you author with the <b>Page</b> scope in the timeline editor. Picking a different page navigates to it first.</Note>
         </>}
+
+        {node.type === 'compute' && <>
+          <Field label="A"><Input size="sm" placeholder="{{count}} or 2" value={node.a || ''} onChange={e => set('a')(e.target.value)} /></Field>
+          <Field label="Operation"><Select size="sm" options={[
+            { value: '+', label: '+  add' }, { value: '-', label: '−  subtract' }, { value: '*', label: '×  multiply' }, { value: '/', label: '÷  divide' },
+            { value: 'min', label: 'min' }, { value: 'max', label: 'max' }, { value: 'concat', label: 'concat (join text)' }]} value={node.op || '+'} onChange={e => set('op')(e.target.value)} /></Field>
+          <Field label="B"><Input size="sm" placeholder="{{step}} or 1" value={node.b || ''} onChange={e => set('b')(e.target.value)} /></Field>
+          <Field label="Store result in"><Select size="sm" options={varOptions} value={node.target || ''} onChange={e => set('target')(e.target.value)} /></Field>
+          <Note>{varHint}</Note>
+        </>}
+
+        {node.type === 'random' && <>
+          <Field label="Mode"><Select size="sm" options={[{ value: 'number', label: 'Number in range' }, { value: 'list', label: 'Pick from list' }]} value={node.mode || 'number'} onChange={e => set('mode')(e.target.value)} /></Field>
+          {(node.mode || 'number') === 'number' ? (
+            <div style={{ display: 'flex', gap: 8 }}>
+              <div style={{ flex: 1 }}><Field label="Min"><Input size="sm" placeholder="0" value={node.min ?? ''} onChange={e => set('min')(e.target.value)} /></Field></div>
+              <div style={{ flex: 1 }}><Field label="Max"><Input size="sm" placeholder="100" value={node.max ?? ''} onChange={e => set('max')(e.target.value)} /></Field></div>
+            </div>
+          ) : (
+            <Field label="Items (comma-separated)"><Input size="sm" placeholder="red, green, blue" value={node.list || ''} onChange={e => set('list')(e.target.value)} /></Field>
+          )}
+          <Field label="Store result in"><Select size="sm" options={varOptions} value={node.target || ''} onChange={e => set('target')(e.target.value)} /></Field>
+        </>}
+
+        {node.type === 'storage' && <>
+          <Field label="Action"><Select size="sm" options={[{ value: 'set', label: 'Set (save)' }, { value: 'get', label: 'Get (load)' }, { value: 'remove', label: 'Remove' }]} value={node.mode || 'set'} onChange={e => set('mode')(e.target.value)} /></Field>
+          <Field label="Key"><Input size="sm" placeholder="authToken" value={node.key || ''} onChange={e => set('key')(e.target.value)} /></Field>
+          {(node.mode || 'set') === 'set' && <Field label="Value"><Input size="sm" placeholder="{{resp.body.token}} or literal" value={node.value || ''} onChange={e => set('value')(e.target.value)} /></Field>}
+          {node.mode === 'get' && <Field label="Store value in"><Select size="sm" options={varOptions} value={node.target || ''} onChange={e => set('target')(e.target.value)} /></Field>}
+          <Note>Persists in the browser's <b>localStorage</b> — values survive reloads inside Preview/Run.</Note>
+        </>}
+
+        {node.type === 'confirm' && <>
+          <Field label="Message"><Input size="sm" placeholder="Delete this item?" value={node.message || ''} onChange={e => set('message')(e.target.value)} /></Field>
+          <Note>Shows a yes/no dialog, then continues down the <b>yes</b> or <b>no</b> port. Wire each to a different next step.</Note>
+        </>}
+
+        {node.type === 'runWorkflow' && <>
+          <Field label="Workflow"><Select size="sm"
+            options={[{ value: '', label: 'Select workflow…' }, ...(workflows || []).filter(w => w.id !== currentWfId).map(w => ({ value: w.id, label: w.name }))]}
+            value={node.workflowId || ''} onChange={e => set('workflowId')(e.target.value)} /></Field>
+          <Note>Runs another workflow inline, sharing the same variables — good for reusable sub-flows. Nesting is capped at 8 levels.</Note>
+        </>}
+
+        {node.type === 'delay' && <>
+          <Field label="Wait (milliseconds)"><Input size="sm" placeholder="500" value={node.ms ?? ''} onChange={e => set('ms')(e.target.value)} /></Field>
+          <Note>Pauses the run before continuing. Capped at 20000ms (20s). Accepts {'{{variables}}'}.</Note>
+        </>}
+
+        {node.type === 'log' && <>
+          <Field label="Message"><Input size="sm" placeholder="Reached checkout with {{total}}" value={node.message || ''} onChange={e => set('message')(e.target.value)} /></Field>
+          <Field label="Level"><Select size="sm" options={[{ value: 'info', label: 'Info' }, { value: 'success', label: 'Success' }, { value: 'warning', label: 'Warning' }, { value: 'danger', label: 'Error' }]} value={node.level || 'info'} onChange={e => set('level')(e.target.value)} /></Field>
+          <Note>Writes a line to the Run log — handy for tracing a flow.</Note>
+        </>}
+
+        {node.type === 'stop' && <Note>Ends the workflow immediately. Nothing wired after this node runs.</Note>}
       </div>
     </div>
   );
@@ -432,6 +582,61 @@ function ConditionEditor({ node, onChange }) {
       ))}
       <Button variant="outline" size="sm" fullWidth onClick={add} iconLeft={<i data-lucide="plus"></i>}>Add branch</Button>
       <Note>Branches are checked top-to-bottom; the first match takes its port. If none match, the <b>else</b> port is used.</Note>
+    </div>
+  );
+}
+
+// ---- grouped, searchable "Add node" menu ----
+// Scales past a flat toolbar row: nodes are grouped by their catalogue `category` and filtered live.
+function AddNodeMenu({ onAdd, disabled }) {
+  const [open, setOpen] = React.useState(false);
+  const [q, setQ] = React.useState('');
+  const ref = React.useRef(null);
+  React.useEffect(() => {
+    if (!open) return;
+    const onDoc = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDoc); document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDoc); document.removeEventListener('keydown', onKey); };
+  }, [open]);
+  React.useEffect(() => { if (window.renderLucideIcons) window.renderLucideIcons(); }, [open, q]);
+  const ql = q.trim().toLowerCase();
+  const groups = (window.WORKFLOW_CATEGORIES || []).map(cat => ({
+    cat,
+    types: Object.keys(WORKFLOW_NODE_TYPES).filter(t => t !== 'trigger' && WORKFLOW_NODE_TYPES[t].category === cat
+      && (!ql || WORKFLOW_NODE_TYPES[t].label.toLowerCase().includes(ql) || t.toLowerCase().includes(ql))),
+  })).filter(g => g.types.length);
+  return (
+    <div ref={ref} style={{ position: 'relative', flex: 'none' }}>
+      <button type="button" disabled={disabled} onClick={() => setOpen(o => !o)} title="Add a node"
+        style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 28, padding: '0 10px', borderRadius: 6, border: '1px solid var(--border-default)', background: open ? 'var(--surface-hover)' : 'transparent', color: disabled ? 'var(--text-disabled)' : 'var(--text-primary)', cursor: disabled ? 'default' : 'pointer', fontSize: 12, fontWeight: 500 }}>
+        <i data-lucide="plus" style={{ width: 14, height: 14 }}></i>Add node
+        <i data-lucide="chevron-down" style={{ width: 12, height: 12, opacity: 0.6 }}></i>
+      </button>
+      {open && (
+        <div style={{ position: 'absolute', top: 34, left: 0, width: 264, maxHeight: 440, overflowY: 'auto', zIndex: 40,
+          background: 'var(--surface)', border: '1px solid var(--border-default)', borderRadius: 8, boxShadow: 'var(--shadow-lg, 0 8px 30px rgba(0,0,0,.45))', padding: 8 }}>
+          <input autoFocus value={q} onChange={e => setQ(e.target.value)} placeholder="Search nodes…" spellCheck={false}
+            style={{ width: '100%', height: 30, boxSizing: 'border-box', padding: '0 9px', marginBottom: 6, border: '1px solid var(--border-subtle)', borderRadius: 5, background: 'var(--surface-inset)', color: 'var(--text-primary)', fontSize: 12.5, outline: 'none' }} />
+          {groups.length === 0 && <div style={{ padding: 10, fontSize: 12, color: 'var(--text-disabled)' }}>No matching nodes.</div>}
+          {groups.map(g => (
+            <div key={g.cat} style={{ marginBottom: 4 }}>
+              <div style={{ fontSize: 9.5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.12em', color: 'var(--text-disabled)', padding: '5px 6px 3px' }}>{g.cat}</div>
+              {g.types.map(t => {
+                const m = WORKFLOW_NODE_TYPES[t];
+                return (
+                  <button key={t} type="button" onClick={() => { onAdd(t); setOpen(false); setQ(''); }}
+                    onMouseEnter={e => { e.currentTarget.style.background = 'var(--surface-hover)'; }}
+                    onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+                    style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', padding: '7px 8px', border: 0, borderRadius: 5, background: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 12.5, textAlign: 'left' }}>
+                    <i data-lucide={m.icon} style={{ width: 14, height: 14, color: m.accent, flex: 'none' }}></i>{m.label}
+                  </button>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -487,6 +692,7 @@ function TextArea({ value, onChange, placeholder }) {
 const rowStyle = (active) => ({ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 5, cursor: 'pointer', background: active ? 'var(--surface-hover)' : 'transparent', color: active ? 'var(--text-primary)' : 'var(--text-secondary)' });
 const miniBtn = { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 22, height: 22, border: 0, borderRadius: 4, background: 'transparent', color: 'var(--text-muted)', cursor: 'pointer', flex: 'none' };
 const miniIco = { width: 13, height: 13 };
+const zoomBtn = { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 26, height: 22, border: 0, borderRadius: 4, background: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer', flex: 'none' };
 const portDot = { position: 'absolute', width: 12, height: 12, borderRadius: '50%', border: '2px solid var(--border-strong)', zIndex: 3 };
 
 window.WorkflowView = WorkflowView;

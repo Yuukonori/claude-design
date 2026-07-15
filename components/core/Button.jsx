@@ -50,7 +50,7 @@ export function Button({
   const [hover, setHover] = React.useState(false);
   const hoverStyle = !disabled && hover ? ({
     solid: { background: 'var(--action-solid-hover)', borderColor: 'var(--action-solid-hover)' },
-    outline: { background: 'var(--surface-hover)', borderColor: 'var(--border-strong)' },
+    outline: { background: 'color-mix(in srgb, var(--text-primary) 7%, transparent)', borderColor: 'var(--border-strong)' },
     ghost: { background: 'var(--action-ghost-hover)', color: 'var(--text-primary)' },
     danger: { background: 'var(--status-danger-bg)' },
   }[variant] || {}) : {};

@@ -1,0 +1,24 @@
+# Deps are reinstalled cleanly inside the image via `npm ci`
+node_modules
+npm-debug.log*
+
+# VCS & tooling
+.git
+.gitignore
+.claude
+.vscode
+.hintrc
+_adherence.oxlintrc.json
+.thumbnail
+
+# Secrets — provided at runtime via env vars, never baked into the image
+.env
+server/.env
+*.local.env
+
+# Docker/meta files themselves
+Dockerfile
+.dockerignore
+docker-compose.yml
+render.yaml
+DEPLOY.md

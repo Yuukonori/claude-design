@@ -200,6 +200,7 @@ function InputField({ node, tfx, fill }) {
 const SHAPE_KINDS = new Set(['rect', 'ellipse', 'line', 'triangle', 'star', 'polygon', 'arrow']);
 const POLY_KINDS = new Set(['triangle', 'star', 'polygon', 'arrow']);
 window.SHAPE_KINDS = SHAPE_KINDS;
+window.POLY_KINDS = POLY_KINDS;
 
 // Polygon points in a 0..100 box (the svg stretches to the node via preserveAspectRatio=none).
 function shapePoints(kind, node) {
@@ -217,6 +218,7 @@ function shapePoints(kind, node) {
   }
   return '';
 }
+window.shapePoints = shapePoints;
 
 function svgGradient(gid, g) {
   const stops = (g.stops || []).slice().sort((a, b) => (a.pos ?? 0) - (b.pos ?? 0))
@@ -291,7 +293,7 @@ function pvRender(node) {
         o={{ size: node.btnIconSize || 15, color: node.btnIconColor, stroke: node.btnIconStroke, rotate: node.btnIconRotate, flipH: node.btnIconFlipH, flipV: node.btnIconFlipV, opacity: node.btnIconOpacity }} />
     ) : null;
     return (
-      <button type="button" disabled={!!node.disabled} style={{ ...box, ...palette, display: 'inline-flex', alignItems: 'center', justifyContent: justifyFor(node.textAlign, 'center'), gap: node.btnIconGap ?? 7, fontFamily: ff(node.fontFamily) || 'var(--font-sans)', fontWeight: WEIGHT[node.fontWeight] || 500, fontSize: node.fontSize || BTN_FS[node.btnSize] || 13, cursor: node.disabled ? 'not-allowed' : 'pointer', opacity: node.disabled ? 0.45 : 1, ...tfx }}>
+      <button type="button" disabled={!!node.disabled} style={{ ...box, ...palette, ...(node.textColor ? { color: node.textColor } : null), display: 'inline-flex', alignItems: 'center', justifyContent: justifyFor(node.textAlign, 'center'), gap: node.btnIconGap ?? 7, fontFamily: ff(node.fontFamily) || 'var(--font-sans)', fontWeight: WEIGHT[node.fontWeight] || 500, fontSize: node.fontSize || BTN_FS[node.btnSize] || 13, cursor: node.disabled ? 'not-allowed' : 'pointer', opacity: node.disabled ? 0.45 : 1, ...tfx }}>
         {pos !== 'right' && iconEl}{pos !== 'only' && (node.label ?? node.name)}{pos === 'right' && iconEl}
       </button>
     );
@@ -805,6 +807,11 @@ function PreviewCanvas({ nodes, connections, artboard, device, onAction, runtime
 
   const hasScene = (n) => !!(sceneTL && (sceneTL.tracks || []).some(tr => tr.nodeId === n.id));
   const visible = nodes.map(applyRt).map(applyScene).filter(n => !n.hidden && !override[n.id]);
+  // Clipping masks: the mask shape itself is invisible in the prototype (it only defines the clip);
+  // every layer that points at it gets clipped to its silhouette. Look-ups use the resolved geometry
+  // so a moving/animating mask drags the clip window with it.
+  const maskById = {}; visible.forEach(n => { maskById[n.id] = n; });
+  const maskNodeIds = new Set(visible.filter(n => n.maskId).map(n => n.maskId));
   const W = artboard ? artboard.w : 1440, H = artboard ? artboard.h : 1024;
 
   // State overrides are applied by re-rendering the merged node (below); this only supplies the
@@ -882,6 +889,9 @@ function PreviewCanvas({ nodes, connections, artboard, device, onAction, runtime
         <div ref={rootRef} style={{ position: 'absolute', left: 0, top: 0, transformOrigin: '0 0', transform: `translate(${view.x}px,${view.y}px) scale(${view.z})` }}>
         <div style={{ position: 'relative', width: W, height: H, background: 'var(--surface)', border: '1px solid var(--border-subtle)', boxShadow: 'var(--shadow-md)', overflow: 'hidden' }}>
           {visible.map(n => {
+            if (maskNodeIds.has(n.id)) return null;              // mask shapes are invisible; they only clip
+            const maskNode = n.maskId ? maskById[n.maskId] : null;
+            const clipCss = maskNode && window.clipPathForMask ? window.clipPathForMask(n, maskNode) : null;
             const a = n.anim;
             // `backwards` (not `both`): apply the first keyframe during the delay so there's no
             // start-flash, but DON'T hold the last keyframe after. Entrance keyframes end at the
@@ -938,7 +948,7 @@ function PreviewCanvas({ nodes, connections, artboard, device, onAction, runtime
                 onClick={onClick} onContextMenu={onCtx}
                 onMouseEnter={onEnter} onMouseLeave={onLeave} onMouseDown={onDown} onMouseUp={onUp}
                 onDragStart={onDragStart} onDragEnd={onDragEnd}
-                style={{ position: 'absolute', left: n.x, top: n.y, width: n.w, height: n.h, animation, cursor: clickable ? 'pointer' : (dragEnabled ? 'grab' : 'default'), overflow: n.clipContent ? 'hidden' : 'visible' }}>
+                style={{ position: 'absolute', left: n.x, top: n.y, width: n.w, height: n.h, animation, cursor: clickable ? 'pointer' : (dragEnabled ? 'grab' : 'default'), overflow: n.clipContent ? 'hidden' : 'visible', ...(clipCss ? { clipPath: clipCss, WebkitClipPath: clipCss } : null) }}>
                 <PreviewNode node={rendered} />
               </div>
             );

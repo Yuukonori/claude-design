@@ -495,6 +495,7 @@ function LatticeApp() {
   const lastNudgeRef = React.useRef(0);
   const dragUndoRef = React.useRef(null);
   const canvasViewRef = React.useRef(null);   // persists Canvas pan/zoom across preview toggles
+  const canvasApiRef = React.useRef(null);    // Canvas publishes { fit, reset, zoomTo, zoomToSelection } here
   const artboardRef = React.useRef(null);     // current device artboard box, for single-node align
   const editingStateRef = React.useRef('default');
   const openAnimTabsRef = React.useRef([]);
@@ -673,6 +674,15 @@ function LatticeApp() {
             return await r.json();
           } catch (e) { return { status: 0, ok: false, body: null, error: String(e) }; }
         },
+        // Confirm dialog (Confirm node) and persistent key/value (Local storage node), guarded so a
+        // locked-down browser can't throw. `workflows` lets a Run-workflow node call a sibling flow.
+        confirm: (msg) => { try { return window.confirm(msg); } catch { return false; } },
+        storage: {
+          get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
+          set: (k, v) => { try { localStorage.setItem(k, v); } catch {} },
+          remove: (k) => { try { localStorage.removeItem(k); } catch {} },
+        },
+        workflows: workflowsRef.current,
       });
     } catch (e) { result = 'error'; pushStep({ label: 'Error', tone: 'danger', text: String(e) }); }
     setRunLog(rs => rs.map(r => r.id === runId ? { ...r, result } : r));
@@ -1188,7 +1198,8 @@ function LatticeApp() {
 
   const deleteNode = React.useCallback((id) => {
     pushHistory();
-    setNodes(ns => ns.filter(n => n.id !== id));
+    // Drop the node, and clear any dangling maskId that pointed at it (a deleted mask un-clips its layers).
+    setNodes(ns => ns.filter(n => n.id !== id).map(n => { if (n.maskId !== id) return n; const rest = { ...n }; delete rest.maskId; return rest; }));
     setConnections(cs => cs.filter(c => c.from !== id && c.to !== id));
     setSelectedIds(ids => ids.filter(i => i !== id));
     pruneAnimTabs(t => t.nodeId !== id);
@@ -1198,7 +1209,7 @@ function LatticeApp() {
     if (!ids.length) return;
     const idSet = new Set(ids);
     pushHistory();
-    setNodes(ns => ns.filter(n => !idSet.has(n.id)));
+    setNodes(ns => ns.filter(n => !idSet.has(n.id)).map(n => { if (!n.maskId || !idSet.has(n.maskId)) return n; const rest = { ...n }; delete rest.maskId; return rest; }));
     setConnections(cs => cs.filter(c => !idSet.has(c.from) && !idSet.has(c.to)));
     setSelectedIds([]);
     pruneAnimTabs(t => !idSet.has(t.nodeId));
@@ -1264,6 +1275,107 @@ function LatticeApp() {
     pushHistory();
     setNodes(ns => { const n = ns.find(x => x.id === id); return n ? [...ns.filter(x => x.id !== id), n] : ns; });
   }, [pushHistory, setNodes]);
+
+  // --- Design-tool batch ops (drive the command palette + context menu) --------------------------
+  const selOr = (ids) => (ids && ids.length ? ids : selectedIdsRef.current) || [];
+
+  // Z-order within the nodes array (later = drawn on top). front/back jump to an end; forward/backward
+  // shift one slot past the nearest non-selected neighbour (iterating from the far side so a run of
+  // selected layers keeps its internal order and never leapfrogs itself).
+  const orderSelection = React.useCallback((mode, ids) => {
+    const sel = selOr(ids); if (!sel.length) return;
+    const set = new Set(sel);
+    pushHistory();
+    setNodes(ns => {
+      if (mode === 'front') return [...ns.filter(n => !set.has(n.id)), ...ns.filter(n => set.has(n.id))];
+      if (mode === 'back') return [...ns.filter(n => set.has(n.id)), ...ns.filter(n => !set.has(n.id))];
+      const arr = ns.slice();
+      if (mode === 'forward') { for (let i = arr.length - 2; i >= 0; i--) if (set.has(arr[i].id) && !set.has(arr[i + 1].id)) { [arr[i], arr[i + 1]] = [arr[i + 1], arr[i]]; } }
+      else if (mode === 'backward') { for (let i = 1; i < arr.length; i++) if (set.has(arr[i].id) && !set.has(arr[i - 1].id)) { [arr[i], arr[i - 1]] = [arr[i - 1], arr[i]]; } }
+      return arr;
+    });
+  }, [pushHistory, setNodes]);
+
+  const flipSelection = React.useCallback((axis, ids) => {
+    const sel = selOr(ids); if (!sel.length) return;
+    const set = new Set(sel), key = axis === 'v' ? 'flipV' : 'flipH';
+    pushHistory();
+    setNodes(ns => ns.map(n => set.has(n.id) ? { ...n, [key]: !n[key] } : n));
+  }, [pushHistory, setNodes]);
+
+  const rotateSelection = React.useCallback((deg, ids) => {
+    const sel = selOr(ids); if (!sel.length) return;
+    const set = new Set(sel);
+    pushHistory();
+    setNodes(ns => ns.map(n => set.has(n.id) ? { ...n, rotation: ((((n.rotation || 0) + deg) % 360) + 360) % 360 } : n));
+  }, [pushHistory, setNodes]);
+
+  const resetTransformSelection = React.useCallback((ids) => {
+    const sel = selOr(ids); if (!sel.length) return;
+    const set = new Set(sel);
+    pushHistory();
+    setNodes(ns => ns.map(n => set.has(n.id) ? { ...n, rotation: 0, scale: 100, skewX: 0, skewY: 0, flipH: false, flipV: false } : n));
+    fireToast({ tone: 'neutral', title: 'Transform reset' });
+  }, [pushHistory, setNodes]);
+
+  const hideSelection = React.useCallback(() => {
+    const sel = selectedIdsRef.current || []; if (!sel.length) return;
+    pushHistory();
+    const dev = geomDeviceRef.current;
+    sel.forEach(id => { const n = nodesRef.current.find(x => x.id === id); if (n && !geomAt(n, dev).hidden) writeGeom(id, { hidden: true }); });
+    fireToast({ tone: 'neutral', title: 'Hid ' + sel.length + ' layer' + (sel.length > 1 ? 's' : '') });
+  }, [pushHistory, writeGeom]);
+
+  const showAllNodes = React.useCallback(() => {
+    pushHistory();
+    const dev = geomDeviceRef.current;
+    nodesRef.current.forEach(n => { if (geomAt(n, dev).hidden) writeGeom(n.id, { hidden: false }); });
+    fireToast({ tone: 'neutral', title: 'All layers shown' });
+  }, [pushHistory, writeGeom]);
+
+  const lockSelection = React.useCallback((v) => {
+    const sel = selectedIdsRef.current || []; if (!sel.length) return;
+    const set = new Set(sel);
+    pushHistory();
+    setNodes(ns => ns.map(n => set.has(n.id) ? { ...n, locked: v } : n));
+    fireToast({ tone: 'neutral', title: v ? 'Locked selection' : 'Unlocked selection' });
+  }, [pushHistory, setNodes]);
+
+  const unlockAll = React.useCallback(() => {
+    pushHistory();
+    setNodes(ns => ns.map(n => n.locked ? { ...n, locked: false } : n));
+    fireToast({ tone: 'neutral', title: 'All layers unlocked' });
+  }, [pushHistory, setNodes]);
+
+  const isolateSelection = React.useCallback(() => {
+    const sel = selectedIdsRef.current || []; if (!sel.length) return;
+    const set = new Set(sel);
+    pushHistory();
+    const dev = geomDeviceRef.current;
+    nodesRef.current.forEach(n => { const want = !set.has(n.id); if (!!geomAt(n, dev).hidden !== want) writeGeom(n.id, { hidden: want }); });
+    fireToast({ tone: 'neutral', title: 'Isolated selection', message: 'Run “Show all layers” to exit.' });
+  }, [pushHistory, writeGeom]);
+
+  const kOf = (n) => (window.kindOf ? window.kindOf(n) : (n && n.kind));
+  const selectInverse = React.useCallback(() => {
+    const set = new Set(selectedIdsRef.current || []);
+    setSelectedIds(nodesRef.current.filter(n => !set.has(n.id)).map(n => n.id));
+  }, []);
+  const selectSameKind = React.useCallback(() => {
+    const sel = selectedIdsRef.current || []; if (!sel.length) return;
+    const kinds = new Set(sel.map(id => kOf(nodesRef.current.find(x => x.id === id))));
+    setSelectedIds(nodesRef.current.filter(n => kinds.has(kOf(n))).map(n => n.id));
+  }, []);
+  const FRAME_KINDS = new Set(['frame', 'card', 'stack', 'grid', 'section']);
+  const selectAllFrames = React.useCallback(() => {
+    const ids = nodesRef.current.filter(n => FRAME_KINDS.has(kOf(n))).map(n => n.id);
+    ids.length ? setSelectedIds(ids) : fireToast({ tone: 'warning', title: 'No frames on this page' });
+  }, []);
+  const selectChildrenOfSelection = React.useCallback(() => {
+    const sel = selectedIdsRef.current || []; if (!sel.length) return;
+    const kids = connectionsRef.current.filter(c => c.kind === 'child' && sel.includes(c.from)).map(c => c.to);
+    kids.length ? setSelectedIds(kids) : fireToast({ tone: 'warning', title: 'No nested layers', message: 'The selection has no children.' });
+  }, []);
 
   const alignNodes = React.useCallback((ids, edge) => {
     if (!ids || ids.length === 0) return;
@@ -1526,6 +1638,55 @@ function LatticeApp() {
     fireToast({ tone: 'neutral', title: 'Ungrouped' });
   }, [pushHistory, setNodes, setConnections]);
 
+  // Clipping mask: from a multi-selection, one shape becomes the mask and the rest are clipped to it
+  // (Figma-style, non-destructive — both layers survive, `content.maskId → mask.id`). The mask is the
+  // one vector shape in the selection, else the top-most layer. An image is auto-fitted to the shape
+  // (box = mask box, object-fit: cover) so "drop image, drop circle, mask" yields the expected crop.
+  const MASK_SHAPE_KINDS = React.useMemo(() => new Set(['ellipse', 'rect', 'star', 'polygon', 'triangle', 'arrow']), []);
+  const applyClipMask = React.useCallback((ids) => {
+    const sel = (ids && ids.length ? ids : selectedIdsRef.current) || [];
+    const all = nodesRef.current;
+    const chosen = sel.map(id => all.find(n => n.id === id)).filter(Boolean);
+    if (chosen.length < 2) {
+      fireToast({ tone: 'warning', title: 'Select two layers', message: 'Pick the image (or any layer) plus a shape to mask it with.' });
+      return;
+    }
+    const kof = (n) => (window.kindOf ? window.kindOf(n) : n.kind);
+    const zi = (n) => all.findIndex(x => x.id === n.id); // later in the array = drawn on top
+    const shapes = chosen.filter(n => MASK_SHAPE_KINDS.has(kof(n)));
+    const mask = (shapes.length && shapes.length < chosen.length)
+      ? shapes.reduce((a, b) => (zi(b) > zi(a) ? b : a))
+      : chosen.reduce((a, b) => (zi(b) > zi(a) ? b : a));
+    const content = chosen.filter(n => n.id !== mask.id);
+    if (!content.length) { fireToast({ tone: 'warning', title: 'Nothing to mask', message: 'Add a layer to clip into the shape.' }); return; }
+    pushHistory();
+    const box = { x: mask.x, y: mask.y, w: mask.w, h: mask.h };
+    const contentIds = new Set(content.map(c => c.id));
+    setNodes(ns => ns.map(n => {
+      if (!contentIds.has(n.id)) return n;
+      const patch = { ...n, maskId: mask.id };
+      if (kof(n) === 'image') { patch.x = box.x; patch.y = box.y; patch.w = box.w; patch.h = box.h; patch.fit = n.fit || 'cover'; }
+      return patch;
+    }));
+    setSelectedIds(content.map(c => c.id));
+    fireToast({ tone: 'success', title: 'Clipping mask applied', message: content.length + ' layer' + (content.length > 1 ? 's' : '') + ' clipped to ' + (mask.name || 'the shape') });
+  }, [pushHistory, setNodes, MASK_SHAPE_KINDS]);
+
+  // Release a mask. Passing the mask shape frees every layer it clips; passing a clipped layer frees
+  // just that one.
+  const releaseMask = React.useCallback((id) => {
+    const all = nodesRef.current;
+    const target = all.find(n => n.id === id);
+    if (!target) return;
+    const clippedByThis = all.filter(n => n.maskId === id).map(n => n.id);
+    const affected = clippedByThis.length ? clippedByThis : (target.maskId ? [id] : []);
+    if (!affected.length) return;
+    pushHistory();
+    const set = new Set(affected);
+    setNodes(ns => ns.map(n => { if (!set.has(n.id)) return n; const rest = { ...n }; delete rest.maskId; return rest; }));
+    fireToast({ tone: 'neutral', title: 'Mask released' });
+  }, [pushHistory, setNodes]);
+
   const placeNode = (c, spot) => {
     const id = uid();
     const kind = c.kind || 'frame';
@@ -1783,7 +1944,8 @@ function LatticeApp() {
   const actions = {
     duplicate: duplicateNodes, detach: detachNode, toggleLock, toggleVisibility, bringToFront,
     remove: deleteMany, deleteOne: deleteNode, copy: copySelection, paste, rename: renameNode,
-    group: groupNodes, ungroup: ungroupNodes,
+    group: groupNodes, ungroup: ungroupNodes, clipMask: applyClipMask, releaseMask,
+    order: orderSelection, flip: flipSelection,
     selectAll: () => setSelectedIds(nodesRef.current.map(n => n.id)), reset: resetActivePage,
   };
 
@@ -1870,6 +2032,12 @@ function LatticeApp() {
       if (mod && k === 'a' && !typing) { if (inDesign) { e.preventDefault(); setSelectedIds(nodesRef.current.map(n => n.id)); } return; }
       if (mod && k === 'g' && !e.shiftKey) { if (inDesign) { e.preventDefault(); groupNodes(selectedIdsRef.current); } return; }
       if (mod && k === 'g' && e.shiftKey) { if (inDesign) { e.preventDefault(); ungroupNodes(selectedIdsRef.current[0]); } return; }
+      if (mod && e.altKey && k === 'm' && !typing) { if (inDesign) { e.preventDefault(); applyClipMask(); } return; }
+      // Z-order: [ / ] shift one step, Ctrl/Cmd+[ / ] jump to back/front (Figma/Photoshop).
+      if ((k === '[' || k === ']') && !typing && inDesign) {
+        if (selectedIdsRef.current.length) { e.preventDefault(); const front = k === ']'; orderSelection(mod ? (front ? 'front' : 'back') : (front ? 'forward' : 'backward')); }
+        return;
+      }
       if (typing) return;
       if (e.key === '?') { setHelpOpen(true); return; }
       if (e.key === 'Escape') { setSelectedIds([]); setHelpOpen(false); return; }
@@ -1883,7 +2051,7 @@ function LatticeApp() {
     };
     document.addEventListener('keydown', h);
     return () => document.removeEventListener('keydown', h);
-  }, [undo, redo, duplicateNodes, copySelection, paste, deleteMany, nudge, groupNodes, ungroupNodes]);
+  }, [undo, redo, duplicateNodes, copySelection, paste, deleteMany, nudge, groupNodes, ungroupNodes, orderSelection]);
 
   // Lucide icons — debounced so drag frames don't re-scan icons on every mousemove.
   // iconSig changes on icon/lock/hidden/glyph edits (not on x/y drags) so canvas components re-render their glyphs.
@@ -2011,7 +2179,7 @@ function LatticeApp() {
       onDropComponent={dropComponent} onAddConnection={addConnection}
       editingState={editingState}
       editingStateLabel={editingState === 'default' ? '' : (((window.STATE_LABELS || {})[editingState]) || ((selected && (selected.customStates || []).find(c => c.id === editingState) || {}).name) || 'state')}
-      onAlign={alignNodes} onDistribute={distributeNodes} viewRef={canvasViewRef} actions={actions}
+      onAlign={alignNodes} onDistribute={distributeNodes} viewRef={canvasViewRef} apiRef={canvasApiRef} actions={actions}
     />
   );
 
@@ -2021,7 +2189,7 @@ function LatticeApp() {
   const editorCommands = [
     { id: 'go-design', group: 'Go to', label: 'Design view', run: () => setView('design') },
     { id: 'go-code', group: 'Go to', label: 'Code view', run: () => setView('code') },
-    { id: 'go-rel', group: 'Go to', label: 'Relationships view', run: () => setView('relationships') },
+    { id: 'go-rel', group: 'Go to', label: 'Relationships view', run: () => setView('rel') },
     { id: 'go-flow', group: 'Go to', label: 'Workflow view', run: () => setView('workflow') },
     { id: 'toggle-preview', group: 'View', label: 'Toggle preview', run: () => setPreviewMode(v => !v) },
     { id: 'run-app', group: 'View', label: 'Run app', run: () => startRun(false) },
@@ -2035,7 +2203,39 @@ function LatticeApp() {
     { id: 'delete', group: 'Edit', label: 'Delete selection', shortcut: 'Del', run: () => { const s = cmdSel(); if (s.length) deleteMany(s); } },
     { id: 'select-all', group: 'Edit', label: 'Select all', shortcut: 'Ctrl+A', run: () => setSelectedIds(nodesRef.current.map(n => n.id)) },
     { id: 'deselect', group: 'Edit', label: 'Deselect all', shortcut: 'Esc', run: () => setSelectedIds([]) },
+    { id: 'ins-frame', group: 'Insert', label: 'Insert frame', run: () => placeNode({ name: 'Frame', icon: 'frame', kind: 'frame' }) },
+    { id: 'ins-rect', group: 'Insert', label: 'Insert rectangle', run: () => placeNode({ name: 'Rectangle', icon: 'square', kind: 'rect' }) },
+    { id: 'ins-ellipse', group: 'Insert', label: 'Insert ellipse', run: () => placeNode({ name: 'Ellipse', icon: 'circle', kind: 'ellipse' }) },
+    { id: 'ins-line', group: 'Insert', label: 'Insert line', run: () => placeNode({ name: 'Line', icon: 'minus', kind: 'line' }) },
+    { id: 'ins-star', group: 'Insert', label: 'Insert star', run: () => placeNode({ name: 'Star', icon: 'star', kind: 'star' }) },
+    { id: 'ins-text', group: 'Insert', label: 'Insert text', run: () => placeNode({ name: 'Text', icon: 'type', kind: 'text' }) },
+    { id: 'ins-image', group: 'Insert', label: 'Insert image', run: () => placeNode({ name: 'Image', icon: 'image', kind: 'image' }) },
+    { id: 'ins-button', group: 'Insert', label: 'Insert button', run: () => placeNode({ name: 'Button', icon: 'square', kind: 'button' }) },
     { id: 'group', group: 'Arrange', label: 'Group selection', shortcut: 'Ctrl+G', run: () => { const s = cmdSel(); if (s.length > 1) groupNodes(s); } },
+    { id: 'clip-mask', group: 'Arrange', label: 'Clipping Mask (fit layer into shape)', shortcut: 'Ctrl+Alt+M', run: () => applyClipMask() },
+    { id: 'release-mask', group: 'Arrange', label: 'Release clipping mask', run: () => { const s = cmdSel(); if (s.length) s.forEach(id => releaseMask(id)); } },
+    { id: 'ungroup', group: 'Arrange', label: 'Ungroup selection', shortcut: 'Ctrl+Shift+G', run: () => { const s = cmdSel(); if (s.length) ungroupNodes(s[0]); } },
+    { id: 'detach', group: 'Arrange', label: 'Detach from parent', run: () => { const s = cmdSel(); if (s.length) s.forEach(id => detachNode(id)); } },
+    { id: 'order-front', group: 'Order', label: 'Bring to front', shortcut: 'Ctrl+]', run: () => orderSelection('front') },
+    { id: 'order-forward', group: 'Order', label: 'Bring forward', shortcut: ']', run: () => orderSelection('forward') },
+    { id: 'order-backward', group: 'Order', label: 'Send backward', shortcut: '[', run: () => orderSelection('backward') },
+    { id: 'order-back', group: 'Order', label: 'Send to back', shortcut: 'Ctrl+[', run: () => orderSelection('back') },
+    { id: 'flip-h', group: 'Transform', label: 'Flip horizontal', run: () => flipSelection('h') },
+    { id: 'flip-v', group: 'Transform', label: 'Flip vertical', run: () => flipSelection('v') },
+    { id: 'rot-cw', group: 'Transform', label: 'Rotate 90° clockwise', run: () => rotateSelection(90) },
+    { id: 'rot-ccw', group: 'Transform', label: 'Rotate 90° counter-clockwise', run: () => rotateSelection(-90) },
+    { id: 'rot-180', group: 'Transform', label: 'Rotate 180°', run: () => rotateSelection(180) },
+    { id: 'reset-transform', group: 'Transform', label: 'Reset transform', run: () => resetTransformSelection() },
+    { id: 'lock-sel', group: 'Layer', label: 'Lock selection', run: () => lockSelection(true) },
+    { id: 'unlock-sel', group: 'Layer', label: 'Unlock selection', run: () => lockSelection(false) },
+    { id: 'unlock-all', group: 'Layer', label: 'Unlock all layers', run: () => unlockAll() },
+    { id: 'hide-sel', group: 'Layer', label: 'Hide selection', run: () => hideSelection() },
+    { id: 'show-all', group: 'Layer', label: 'Show all layers', run: () => showAllNodes() },
+    { id: 'isolate', group: 'Layer', label: 'Isolate selection (hide others)', run: () => isolateSelection() },
+    { id: 'sel-inverse', group: 'Select', label: 'Select inverse', run: () => selectInverse() },
+    { id: 'sel-same', group: 'Select', label: 'Select same type', run: () => selectSameKind() },
+    { id: 'sel-frames', group: 'Select', label: 'Select all frames', run: () => selectAllFrames() },
+    { id: 'sel-children', group: 'Select', label: 'Select children of selection', run: () => selectChildrenOfSelection() },
     { id: 'align-left', group: 'Align', label: 'Align left', run: () => { const s = cmdSel(); if (s.length) alignNodes(s, 'left'); } },
     { id: 'align-hcenter', group: 'Align', label: 'Align center (horizontal)', run: () => { const s = cmdSel(); if (s.length) alignNodes(s, 'hcenter'); } },
     { id: 'align-right', group: 'Align', label: 'Align right', run: () => { const s = cmdSel(); if (s.length) alignNodes(s, 'right'); } },
@@ -2053,6 +2253,11 @@ function LatticeApp() {
     { id: 'new-page', group: 'Pages', label: 'New page', run: () => addPage() },
     { id: 'toggle-left', group: 'Panels', label: 'Toggle left panel', run: () => setCollapsed(c => ({ ...c, left: !c.left })) },
     { id: 'toggle-right', group: 'Panels', label: 'Toggle right panel', run: () => setCollapsed(c => ({ ...c, right: !c.right })) },
+    { id: 'zoom-fit', group: 'View', label: 'Zoom to fit', run: () => { setView('design'); canvasApiRef.current && canvasApiRef.current.fit(); } },
+    { id: 'zoom-100', group: 'View', label: 'Zoom to 100%', run: () => { setView('design'); canvasApiRef.current && canvasApiRef.current.zoomTo(100); } },
+    { id: 'zoom-sel', group: 'View', label: 'Zoom to selection', run: () => { const s = cmdSel(); setView('design'); canvasApiRef.current && canvasApiRef.current.zoomToSelection(s); } },
+    { id: 'toggle-grid', group: 'View', label: 'Toggle grid', run: () => setSettings(s => ({ ...s, showGrid: s.showGrid === false })) },
+    { id: 'toggle-snap', group: 'View', label: 'Toggle snap to grid', run: () => setSettings(s => ({ ...s, snap: !s.snap })) },
     { id: 'open-settings', group: 'App', label: 'Open settings', run: () => setSettingsOpen(true) },
     { id: 'share', group: 'App', label: 'Share project', run: () => setShareOpen(true) },
     { id: 'generate', group: 'App', label: 'Generate code', run: () => generate() },
@@ -2090,7 +2295,7 @@ function LatticeApp() {
                 <PagesPanel pages={pages} activePageId={activePageId} onSelect={selectPage} onAdd={addPage} onRename={renamePage} onDelete={deletePage} />
               </div>
               {sectionDivider('pages')}
-              <div ref={librarySecRef} style={{ height: panelH.library == null ? 'auto' : panelH.library, flex: 'none', overflowY: 'auto' }}>
+              <div ref={librarySecRef} style={{ height: panelH.library == null ? 'auto' : panelH.library, flex: '0 1 auto', minHeight: 0, overflowY: 'auto' }}>
                 <LibraryPanel onPlace={placeNode} customComponents={customComponents} onDeleteCustom={deleteCustomComponent} libraryComponents={libraryComponents} />
               </div>
               {sectionDivider('library')}
@@ -2472,9 +2677,13 @@ function AccountFooter() {
   return (
     <div style={{ flex: 'none', borderTop: '1px solid var(--border-subtle)', background: 'var(--surface)',
       padding: '10px 12px', display: 'flex', alignItems: 'center', gap: 10 }}>
-      <div title={name} style={{ flex: 'none', width: 30, height: 30, borderRadius: '50%',
+      <div title={name} style={{ flex: 'none', width: 30, height: 30, borderRadius: '50%', overflow: 'hidden',
         display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 600,
-        color: 'var(--action-solid-text)', background: 'var(--action-solid)', userSelect: 'none' }}>{initials}</div>
+        color: 'var(--action-solid-text)', background: 'var(--action-solid)', userSelect: 'none' }}>
+        {user && user.avatar_url
+          ? <img src={user.avatar_url} alt={name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+          : initials}
+      </div>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</div>
         <div title={email} style={{ fontSize: 11, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{email}</div>

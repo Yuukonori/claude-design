@@ -11,28 +11,47 @@
 // components fall back to their own local state (used by the design canvas & anim canvas).
 window.WorkflowRuntime = window.WorkflowRuntime || React.createContext(null);
 
-// Node-type catalogue: label, icon (lucide), accent colour, input arity, and how outputs branch.
-// `out: 'branches'` means the port list is computed from the node's condition branches.
+// Node-type catalogue: label, icon (lucide), accent colour, `category` (for the grouped add-menu),
+// input arity, and how outputs branch. `out: 'branches'` means the port list is computed from the
+// node's condition branches; `out: []` means the node is terminal (no outgoing port, e.g. Stop).
 const WORKFLOW_NODE_TYPES = {
-  trigger:   { label: 'Trigger',      icon: 'play',            accent: 'var(--green-base)', inputs: 0, out: ['next'] },
-  setVar:    { label: 'Set variable', icon: 'variable',        accent: 'var(--blue-base)',  inputs: 1, out: ['next'] },
-  api:       { label: 'API request',  icon: 'globe',           accent: 'var(--blue-base)',  inputs: 1, out: ['next'] },
-  condition: { label: 'Condition',    icon: 'git-branch',      accent: 'var(--amber-base)', inputs: 1, out: 'branches' },
-  navigate:  { label: 'Navigate',     icon: 'corner-up-right', accent: 'var(--green-base)', inputs: 1, out: ['next'] },
-  setProp:   { label: 'Set property', icon: 'sliders',         accent: 'var(--blue-base)',  inputs: 1, out: ['next'] },
-  toast:     { label: 'Toast',        icon: 'message-square',  accent: 'var(--red-base)',   inputs: 1, out: ['next'] },
-  playAnim:     { label: 'Play component animation', icon: 'film',        accent: 'var(--amber-base)', inputs: 1, out: ['next'] },
-  playPageAnim: { label: 'Play page animation',      icon: 'clapperboard', accent: 'var(--amber-base)', inputs: 1, out: ['next'] },
+  trigger:      { label: 'Trigger',      icon: 'play',            accent: 'var(--green-base)', category: 'Flow',      inputs: 0, out: ['next'] },
+  condition:    { label: 'Condition',    icon: 'git-branch',      accent: 'var(--amber-base)', category: 'Flow',      inputs: 1, out: 'branches' },
+  confirm:      { label: 'Confirm',      icon: 'circle-help',     accent: 'var(--amber-base)', category: 'Flow',      inputs: 1, out: ['yes', 'no'] },
+  stop:         { label: 'Stop',         icon: 'circle-stop',     accent: 'var(--red-base)',   category: 'Flow',      inputs: 1, out: [] },
+  setVar:       { label: 'Set variable', icon: 'variable',        accent: 'var(--blue-base)',  category: 'Data',      inputs: 1, out: ['next'] },
+  compute:      { label: 'Compute',      icon: 'calculator',      accent: 'var(--blue-base)',  category: 'Data',      inputs: 1, out: ['next'] },
+  random:       { label: 'Random',       icon: 'dices',           accent: 'var(--blue-base)',  category: 'Data',      inputs: 1, out: ['next'] },
+  storage:      { label: 'Local storage',icon: 'database',        accent: 'var(--blue-base)',  category: 'Data',      inputs: 1, out: ['next'] },
+  api:          { label: 'API request',  icon: 'globe',           accent: 'var(--blue-base)',  category: 'Network',   inputs: 1, out: ['next'] },
+  runWorkflow:  { label: 'Run workflow', icon: 'workflow',        accent: 'var(--green-base)', category: 'Network',   inputs: 1, out: ['next'] },
+  navigate:     { label: 'Navigate',     icon: 'corner-up-right', accent: 'var(--green-base)', category: 'Interface', inputs: 1, out: ['next'] },
+  setProp:      { label: 'Set property', icon: 'sliders',         accent: 'var(--blue-base)',  category: 'Interface', inputs: 1, out: ['next'] },
+  toast:        { label: 'Toast',        icon: 'message-square',  accent: 'var(--red-base)',   category: 'Interface', inputs: 1, out: ['next'] },
+  delay:        { label: 'Delay',        icon: 'timer',           accent: 'var(--text-muted)', category: 'Utility',   inputs: 1, out: ['next'] },
+  log:          { label: 'Log',          icon: 'terminal',        accent: 'var(--text-muted)', category: 'Utility',   inputs: 1, out: ['next'] },
+  playAnim:     { label: 'Play component animation', icon: 'film',        accent: 'var(--amber-base)', category: 'Animation', inputs: 1, out: ['next'] },
+  playPageAnim: { label: 'Play page animation',      icon: 'clapperboard', accent: 'var(--amber-base)', category: 'Animation', inputs: 1, out: ['next'] },
 };
 window.WORKFLOW_NODE_TYPES = WORKFLOW_NODE_TYPES;
+
+// Category order for the grouped "Add node" menu.
+const WORKFLOW_CATEGORIES = ['Flow', 'Data', 'Network', 'Interface', 'Animation', 'Utility'];
+window.WORKFLOW_CATEGORIES = WORKFLOW_CATEGORIES;
 
 const COND_OPS = [
   { value: '==', label: 'equals' }, { value: '!=', label: 'not equals' },
   { value: '>', label: 'greater than' }, { value: '<', label: 'less than' },
-  { value: 'contains', label: 'contains' }, { value: 'truthy', label: 'is truthy' },
+  { value: '>=', label: 'greater or equal' }, { value: '<=', label: 'less or equal' },
+  { value: 'contains', label: 'contains' }, { value: 'starts', label: 'starts with' },
+  { value: 'ends', label: 'ends with' }, { value: 'regex', label: 'matches regex' },
+  { value: 'in', label: 'in list (a, b, c)' }, { value: 'truthy', label: 'is truthy' },
   { value: 'empty', label: 'is empty' },
 ];
 window.WORKFLOW_COND_OPS = COND_OPS;
+// Operators that don't need a right-hand value (used to hide the "right" input in the editor).
+const COND_UNARY = new Set(['truthy', 'empty']);
+window.WORKFLOW_COND_UNARY = COND_UNARY;
 
 const uidW = (p) => p + '_' + Math.random().toString(36).slice(2, 7);
 
@@ -41,11 +60,19 @@ function newWorkflowNode(type, x, y) {
   const base = { id: uidW('wn'), type, x: Math.round(x), y: Math.round(y) };
   switch (type) {
     case 'setVar':   return { ...base, target: '', value: '' };
+    case 'compute':  return { ...base, a: '', op: '+', b: '', target: '' };
+    case 'random':   return { ...base, mode: 'number', min: '0', max: '100', list: '', target: '' };
+    case 'storage':  return { ...base, mode: 'set', key: '', value: '', target: '' };
     case 'api':      return { ...base, method: 'POST', url: '', headers: '', body: '', resultVar: '' };
+    case 'runWorkflow': return { ...base, workflowId: '' };
     case 'condition':return { ...base, branches: [{ left: '', op: '==', right: '' }] };
+    case 'confirm':  return { ...base, message: '' };
+    case 'stop':     return { ...base };
     case 'navigate': return { ...base, pageId: '' };
     case 'setProp':  return { ...base, targetNodeId: '', prop: 'label', value: '' };
     case 'toast':    return { ...base, message: '' };
+    case 'delay':    return { ...base, ms: '500' };
+    case 'log':      return { ...base, message: '', level: 'info' };
     case 'playAnim': return { ...base, targetNodeId: '', animId: '' };
     case 'playPageAnim': return { ...base, pageId: '' };
     default:         return base; // trigger
@@ -54,6 +81,8 @@ function newWorkflowNode(type, x, y) {
 window.newWorkflowNode = newWorkflowNode;
 
 // Output ports of a node, as [{ port, label }]. Condition nodes get one port per branch + `else`.
+// A node with several fixed ports (e.g. Confirm → yes/no) labels each; a single-port node stays
+// unlabelled; a terminal node (out: []) has none.
 function workflowOutPorts(node) {
   const meta = WORKFLOW_NODE_TYPES[node.type];
   if (!meta) return [];
@@ -62,7 +91,7 @@ function workflowOutPorts(node) {
     ports.push({ port: 'else', label: 'else' });
     return ports;
   }
-  return meta.out.map(p => ({ port: p, label: '' }));
+  return meta.out.map(p => ({ port: p, label: meta.out.length > 1 ? p : '' }));
 }
 window.workflowOutPorts = workflowOutPorts;
 
@@ -93,12 +122,20 @@ window.resolveTemplate = resolveTemplate;
 function evalCondition(branch, scope) {
   const l = resolveTemplate(branch.left, scope);
   const r = resolveTemplate(branch.right, scope);
+  const ls = l == null ? '' : String(l);
+  const rs = r == null ? '' : String(r);
   switch (branch.op) {
-    case '==': return String(l) === String(r);
-    case '!=': return String(l) !== String(r);
+    case '==': return ls === rs;
+    case '!=': return ls !== rs;
     case '>':  return Number(l) > Number(r);
     case '<':  return Number(l) < Number(r);
-    case 'contains': return String(l).includes(String(r));
+    case '>=': return Number(l) >= Number(r);
+    case '<=': return Number(l) <= Number(r);
+    case 'contains': return ls.includes(rs);
+    case 'starts': return ls.startsWith(rs);
+    case 'ends':   return ls.endsWith(rs);
+    case 'regex':  { try { return new RegExp(rs).test(ls); } catch { return false; } }
+    case 'in':     return rs.split(',').map(s => s.trim()).includes(ls.trim());
     case 'truthy': return !!l && l !== 'false' && l !== '0';
     case 'empty':  return l == null || l === '';
     default: return false;
@@ -115,6 +152,10 @@ window.evalCondition = evalCondition;
 //   callApi({method,url,headers,body}) -> Promise<{status, ok, body}>
 //   playAnim(nodeId, animId) -> bool     play one node's animation state (false = not found)
 //   playPageAnim(pageId)                 replay a page's scene timeline from 0
+//   confirm(message) -> bool             show a yes/no dialog (used by the Confirm node)
+//   storage: { get(k), set(k,v), remove(k) }   persistent key/value (used by the Local storage node)
+//   workflows: [workflow]                sibling workflows (used by the Run-workflow node)
+//   _depth                               internal recursion guard for nested Run-workflow calls
 // }
 async function execWorkflow(workflow, ctx) {
   if (!workflow || !Array.isArray(workflow.nodes)) return;
@@ -138,6 +179,14 @@ async function execWorkflow(workflow, ctx) {
   let guard = 0;
   while (cur && guard++ < 200) {
     let port = 'next';
+    // A disabled (muted) node is skipped entirely — the run continues down its first outgoing edge,
+    // whatever the port, so you can mute a step without rewiring the graph around it.
+    if (cur.disabled) {
+      log({ label: (WORKFLOW_NODE_TYPES[cur.type] || {}).label || cur.type, tone: 'info', text: '(disabled — skipped)' });
+      const skip = (workflow.edges || []).find(e => e.from === cur.id);
+      cur = skip ? byId[skip.to] : null;
+      continue;
+    }
     try {
       switch (cur.type) {
         case 'setVar': {
@@ -204,12 +253,94 @@ async function execWorkflow(workflow, ctx) {
           log({ label: 'Play page animation', tone: 'success', text: `↻ ${pageName(cur.pageId) || 'current page'}` });
           break;
         }
+        case 'compute': {
+          const a = resolveTemplate(cur.a, scope), b = resolveTemplate(cur.b, scope);
+          const na = Number(a), nb = Number(b);
+          let val;
+          switch (cur.op) {
+            case '-': val = na - nb; break;
+            case '*': val = na * nb; break;
+            case '/': val = nb === 0 ? NaN : na / nb; break;
+            case 'min': val = Math.min(na, nb); break;
+            case 'max': val = Math.max(na, nb); break;
+            case 'concat': val = `${a == null ? '' : a}${b == null ? '' : b}`; break;
+            default: val = na + nb; // '+'
+          }
+          if (cur.target) writeVar(cur.target, val);
+          log({ label: 'Compute', tone: 'info', text: `${varName(cur.target)} = ${fmtVal(val)}` });
+          break;
+        }
+        case 'random': {
+          let val;
+          if (cur.mode === 'list') {
+            const items = String(resolveTemplate(cur.list, scope) || '').split(',').map(s => s.trim()).filter(Boolean);
+            val = items.length ? items[Math.floor(Math.random() * items.length)] : '';
+          } else {
+            const min = Number(resolveTemplate(cur.min, scope)); const lo = isNaN(min) ? 0 : min;
+            const max = Number(resolveTemplate(cur.max, scope)); const hi = isNaN(max) ? 100 : max;
+            val = Math.floor(lo + Math.random() * (hi - lo + 1));
+          }
+          if (cur.target) writeVar(cur.target, val);
+          log({ label: 'Random', tone: 'info', text: `${varName(cur.target)} = ${fmtVal(val)}` });
+          break;
+        }
+        case 'storage': {
+          const key = resolveTemplate(cur.key, scope);
+          const mode = cur.mode || 'set';
+          if (!ctx.storage) { log({ label: 'Local storage', tone: 'warning', text: 'storage unavailable in this context' }); break; }
+          if (mode === 'get') {
+            const v = ctx.storage.get(key);
+            if (cur.target) writeVar(cur.target, v);
+            log({ label: 'Local storage', tone: 'info', text: `get ${key || '(no key)'} → ${fmtVal(v)}` });
+          } else if (mode === 'remove') {
+            ctx.storage.remove(key);
+            log({ label: 'Local storage', tone: 'info', text: `remove ${key || '(no key)'}` });
+          } else {
+            const v = resolveTemplate(cur.value, scope);
+            ctx.storage.set(key, typeof v === 'object' ? JSON.stringify(v) : String(v == null ? '' : v));
+            log({ label: 'Local storage', tone: 'info', text: `set ${key || '(no key)'} = ${fmtVal(v)}` });
+          }
+          break;
+        }
+        case 'confirm': {
+          const msg = resolveTemplate(cur.message, scope) || 'Are you sure?';
+          const ok = ctx.confirm ? await ctx.confirm(msg) : (typeof window !== 'undefined' ? window.confirm(msg) : true);
+          port = ok ? 'yes' : 'no';
+          log({ label: 'Confirm', tone: 'info', text: `“${msg}” → took the ${port} path` });
+          break;
+        }
+        case 'runWorkflow': {
+          const sub = (ctx.workflows || []).find(w => w.id === cur.workflowId);
+          const depth = ctx._depth || 0;
+          if (!sub) { log({ label: 'Run workflow', tone: 'warning', text: 'pick a workflow to run' }); break; }
+          if (depth >= 8) { log({ label: 'Run workflow', tone: 'danger', text: 'max nesting depth (8) reached — stopped' }); break; }
+          log({ label: 'Run workflow', tone: 'info', text: `↳ ${sub.name}` });
+          await execWorkflow(sub, { ...ctx, _depth: depth + 1 });
+          break;
+        }
+        case 'delay': {
+          const ms = Math.max(0, Math.min(20000, Number(resolveTemplate(cur.ms, scope)) || 0));
+          log({ label: 'Delay', tone: 'info', text: `wait ${ms}ms` });
+          await new Promise(res => setTimeout(res, ms));
+          break;
+        }
+        case 'log': {
+          const msg = resolveTemplate(cur.message, scope);
+          const tone = ['info', 'success', 'warning', 'danger'].includes(cur.level) ? cur.level : 'info';
+          log({ label: 'Log', tone, text: fmtVal(msg) });
+          break;
+        }
+        case 'stop': {
+          log({ label: 'Stop', tone: 'info', text: 'workflow stopped' });
+          break;
+        }
         default: log({ label: 'Trigger', tone: 'info', text: 'workflow started' }); break;
       }
     } catch (err) {
       log({ label: (WORKFLOW_NODE_TYPES[cur.type] || {}).label || cur.type, tone: 'danger', text: 'Error: ' + err.message });
       console.error('[workflow]', cur.type, err);
     }
+    if (cur.type === 'stop') break; // terminal node — end the run regardless of any wiring
     const next = edgeFrom(cur.id, port);
     cur = next ? byId[next.to] : null;
   }

@@ -194,7 +194,7 @@ function Button({
       borderColor: 'var(--action-solid-hover)'
     },
     outline: {
-      background: 'var(--surface-hover)',
+      background: 'color-mix(in srgb, var(--text-primary) 7%, transparent)',
       borderColor: 'var(--border-strong)'
     },
     ghost: {

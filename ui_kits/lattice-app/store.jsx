@@ -14,8 +14,7 @@ function AuthProvider({ children }) {
 
   const value = {
     user, loading,
-    login: async (b) => { const r = await api.login(b); setUser(r.user); return r.user; },
-    register: async (b) => { const r = await api.register(b); setUser(r.user); return r.user; },
+    loginWithGitHub: () => { window.location.href = '/api/auth/github'; },
     logout: async () => { try { await api.logout(); } catch (e) {} setUser(null); window.navigate('/'); },
     refresh: async () => { try { const r = await api.me(); setUser(r.user); } catch (e) { setUser(null); } },
   };

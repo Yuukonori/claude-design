@@ -2,16 +2,27 @@ const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 const { Pool } = require('pg');
 
-const pool = new Pool({
-  host: process.env.DB_HOST || 'localhost',
-  port: +(process.env.DB_PORT || 5432),
-  user: process.env.DB_USER || 'postgres',
-  password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME || 'postgres',
-  // Render's external Postgres endpoint requires SSL; local Postgres doesn't support it.
-  ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
-  max: 10,
-});
+// Prefer a single connection string (Render / Heroku style) when present; otherwise discrete vars.
+// SSL: forced off with DB_SSL=false (local Postgres / docker-compose can't do TLS); on when
+// DB_SSL=true, or by default whenever DATABASE_URL is used (managed Postgres like Render needs TLS).
+const useUrl = !!process.env.DATABASE_URL;
+const ssl = process.env.DB_SSL === 'false'
+  ? false
+  : (process.env.DB_SSL === 'true' || useUrl)
+    ? { rejectUnauthorized: false }
+    : false;
+
+const pool = new Pool(useUrl
+  ? { connectionString: process.env.DATABASE_URL, ssl, max: 10 }
+  : {
+      host: process.env.DB_HOST || 'localhost',
+      port: +(process.env.DB_PORT || 5432),
+      user: process.env.DB_USER || 'postgres',
+      password: process.env.DB_PASSWORD || '',
+      database: process.env.DB_NAME || 'postgres',
+      ssl,
+      max: 10,
+    });
 
 const query = (text, params) => pool.query(text, params);
 
@@ -85,6 +96,17 @@ async function initSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
   `);
+
+  // Migration: move identity to GitHub OAuth. Idempotent — safe on an existing (password-era) DB.
+  await query(`
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS github_id BIGINT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS github_login TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT;
+    ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL;
+    ALTER TABLE users DROP CONSTRAINT IF EXISTS users_email_key;
+    ALTER TABLE users ALTER COLUMN email DROP NOT NULL;
+  `);
+  await query(`CREATE UNIQUE INDEX IF NOT EXISTS users_github_id_key ON users(github_id) WHERE github_id IS NOT NULL`);
 
   for (const p of PLAN_SEED) {
     await query(

@@ -27,13 +27,31 @@ const nodeColor = (n) => ICON_COLORS[n.icon] || '#9B8AFB';
 // Container kinds render as light outlines on the canvas; everything else renders its real UI.
 const CONTAINER_KINDS = new Set(['frame', 'stack', 'grid', 'card', 'section']);
 
+// A clipping-mask shape renders as a dashed silhouette on the design canvas (it's invisible in
+// Preview/export) so it stays visible & grabbable without painting its own fill over the clip.
+function MaskOutline({ node }) {
+  const kind = window.kindOf ? window.kindOf(node) : node.kind;
+  const stroke = 'rgba(125,178,255,0.95)';
+  const base = { position: 'absolute', inset: 0, pointerEvents: 'none' };
+  if (window.POLY_KINDS && window.POLY_KINDS.has(kind) && window.shapePoints) {
+    return (
+      <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={{ ...base, width: '100%', height: '100%', overflow: 'visible' }}>
+        <polygon points={window.shapePoints(kind, node)} fill="rgba(125,178,255,0.06)" stroke={stroke}
+          strokeWidth="1.2" strokeDasharray="3 2" vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
+      </svg>
+    );
+  }
+  const br = kind === 'ellipse' ? '50%' : (window.radiusCss ? window.radiusCss(node) : (node.radius ? node.radius + 'px' : 0));
+  return <div style={{ ...base, border: `1.5px dashed ${stroke}`, borderRadius: br, background: 'rgba(125,178,255,0.06)' }} />;
+}
+
 // True when node `n` sits fully inside the strictly-larger node `o` — i.e. `o` visually contains it.
 const geomContains = (o, n) => n.id !== o.id &&
   n.x >= o.x && n.y >= o.y &&
   n.x + n.w <= o.x + o.w && n.y + n.h <= o.y + o.h &&
   (o.w * o.h) > (n.w * n.h);
 
-function Canvas({ nodes, connections, settings = {}, artboard, device, selectedIds = [], onSelect, onSelectMany, onUpdateNode, onCommitDrag, onInteractStart, onDropComponent, onAddConnection, onAlign, onDistribute, viewRef, actions = {}, editingState = 'default', editingStateLabel = '' }) {
+function Canvas({ nodes, connections, settings = {}, artboard, device, selectedIds = [], onSelect, onSelectMany, onUpdateNode, onCommitDrag, onInteractStart, onDropComponent, onAddConnection, onAlign, onDistribute, viewRef, apiRef, actions = {}, editingState = 'default', editingStateLabel = '' }) {
   const W = 1600, H = 1000;
 
   const viewportRef = React.useRef(null);
@@ -390,19 +408,40 @@ function Canvas({ nodes, connections, settings = {}, artboard, device, selectedI
     zoomToPoint(transformRef.current.z + delta, r ? r.left + r.width / 2 : 0, r ? r.top + r.height / 2 : 0);
   };
   const resetZoom = () => { transformRef.current = { x: 0, y: 0, z: 1 }; setTransform({ x: 0, y: 0, z: 1 }); };
-  const fitToScreen = () => {
+  // Zoom+pan so a bounding box {minX,minY,maxX,maxY} sits centred in the viewport (shared by
+  // fit-to-screen and zoom-to-selection).
+  const fitBounds = (box) => {
     const vp = viewportRef.current;
-    const vis = nodesRef.current.filter(n => !n.hidden);
-    if (!vp || !vis.length) { resetZoom(); return; }
-    const minX = Math.min(...vis.map(n => n.x)), minY = Math.min(...vis.map(n => n.y));
-    const maxX = Math.max(...vis.map(n => n.x + n.w)), maxY = Math.max(...vis.map(n => n.y + n.h));
-    const bw = Math.max(1, maxX - minX), bh = Math.max(1, maxY - minY), pad = 64;
+    if (!vp || !box) { resetZoom(); return; }
+    const bw = Math.max(1, box.maxX - box.minX), bh = Math.max(1, box.maxY - box.minY), pad = 64;
     const vw = vp.clientWidth, vh = vp.clientHeight;
     const z = Math.min(2, Math.max(0.15, Math.min((vw - pad * 2) / bw, (vh - pad * 2) / bh)));
-    const x = (vw - bw * z) / 2 - minX * z, y = (vh - bh * z) / 2 - minY * z;
+    const x = (vw - bw * z) / 2 - box.minX * z, y = (vh - bh * z) / 2 - box.minY * z;
     transformRef.current = { x, y, z };
     setTransform({ x, y, z });
   };
+  const boundsOf = (list) => list.length ? {
+    minX: Math.min(...list.map(n => n.x)), minY: Math.min(...list.map(n => n.y)),
+    maxX: Math.max(...list.map(n => n.x + n.w)), maxY: Math.max(...list.map(n => n.y + n.h)),
+  } : null;
+  const fitToScreen = () => { const b = boundsOf(nodesRef.current.filter(n => !n.hidden)); b ? fitBounds(b) : resetZoom(); };
+  const zoomToSelection = (ids) => {
+    const set = new Set(ids || []);
+    const b = boundsOf(nodesRef.current.filter(n => set.has(n.id) && !n.hidden));
+    b ? fitBounds(b) : fitToScreen();
+  };
+  const zoomTo = (pct) => {
+    const r = viewportRef.current?.getBoundingClientRect();
+    zoomToPoint((pct || 100) / 100, r ? r.left + r.width / 2 : 0, r ? r.top + r.height / 2 : 0);
+  };
+
+  // Publish an imperative zoom API for the App's command palette (mirrors how PreviewCanvas
+  // publishes its anim controller). Closures read live refs, so a once-per-mount bind stays correct.
+  React.useEffect(() => {
+    if (!apiRef) return;
+    apiRef.current = { fit: fitToScreen, reset: resetZoom, zoomTo, zoomToSelection };
+    return () => { apiRef.current = null; };
+  }, [apiRef]);
 
   // --- Drop from library ---
   const onDrop = (e) => {
@@ -427,13 +466,22 @@ function Canvas({ nodes, connections, settings = {}, artboard, device, selectedI
     if (!menu) return [];
     if (menu.node) {
       const n = menu.node;
+      const isMaskShape = nodes.some(x => x.maskId === n.id);
+      const canMask = selectedIds.length >= 2 && selectedIds.includes(n.id);
       return [
         { label: 'Duplicate', icon: 'copy', shortcut: 'Ctrl+D', onClick: () => actions.duplicate([n.id]) },
         { label: 'Copy', icon: 'clipboard-copy', shortcut: 'Ctrl+C', onClick: () => { onSelect(n.id); actions.copy(); } },
-        { label: 'Bring to front', icon: 'bring-to-front', onClick: () => actions.bringToFront(n.id) },
+        { label: 'Bring to front', icon: 'bring-to-front', shortcut: 'Ctrl+]', onClick: () => (actions.order ? actions.order('front', [n.id]) : actions.bringToFront(n.id)) },
+        { label: 'Bring forward', icon: 'chevron-up', shortcut: ']', onClick: () => actions.order && actions.order('forward', [n.id]) },
+        { label: 'Send backward', icon: 'chevron-down', shortcut: '[', onClick: () => actions.order && actions.order('backward', [n.id]) },
+        { label: 'Send to back', icon: 'send-to-back', shortcut: 'Ctrl+[', onClick: () => actions.order && actions.order('back', [n.id]) },
+        { label: 'Flip horizontal', icon: 'flip-horizontal', onClick: () => actions.flip && actions.flip('h', [n.id]) },
+        { label: 'Flip vertical', icon: 'flip-vertical', onClick: () => actions.flip && actions.flip('v', [n.id]) },
         { label: n.locked ? 'Unlock' : 'Lock', icon: n.locked ? 'lock-open' : 'lock', onClick: () => actions.toggleLock(n.id) },
         { label: n.hidden ? 'Show' : 'Hide', icon: n.hidden ? 'eye' : 'eye-off', onClick: () => actions.toggleVisibility(n.id) },
         { label: 'Detach from parent', icon: 'unlink', disabled: !parentOf[n.id], onClick: () => actions.detach(n.id) },
+        { label: 'Clipping mask', icon: 'crop', shortcut: 'Ctrl+Alt+M', disabled: !canMask, onClick: () => actions.clipMask && actions.clipMask(selectedIds) },
+        ...((isMaskShape || n.maskId) ? [{ label: 'Release mask', icon: 'square-dashed', onClick: () => actions.releaseMask && actions.releaseMask(n.id) }] : []),
         { separator: true },
         { label: 'Delete', icon: 'trash-2', danger: true, shortcut: 'Del', onClick: () => actions.deleteOne(n.id) },
       ];
@@ -459,6 +507,8 @@ function Canvas({ nodes, connections, settings = {}, artboard, device, selectedI
 
   const vpCursor = (draggingId || panning) ? 'grabbing' : spaceHeld ? 'grab' : marqueeRect ? 'crosshair' : 'default';
   const visibleNodes = nodes.filter(n => !n.hidden);
+  // Nodes that are acting as clipping masks (referenced by some layer's maskId) render as outlines.
+  const maskNodeIds = new Set(nodes.filter(n => n.maskId).map(n => n.maskId));
   const connFrom = connectDraft && nodes.find(n => n.id === connectDraft.fromId);
 
   return (
@@ -546,6 +596,9 @@ function Canvas({ nodes, connections, settings = {}, artboard, device, selectedI
           const showPort = sel || hoveredId === n.id;
           const kind = window.kindOf ? window.kindOf(n) : 'frame';
           const isContainer = CONTAINER_KINDS.has(kind);
+          const isMask = maskNodeIds.has(n.id);
+          const maskNode = n.maskId ? nodes.find(m => m.id === n.maskId) : null;
+          const clip = maskNode && window.clipPathForMask ? window.clipPathForMask(n, maskNode) : null;
           return (
             <div key={n.id}
               onMouseDown={e => startMove(e, n)}
@@ -567,12 +620,14 @@ function Canvas({ nodes, connections, settings = {}, artboard, device, selectedI
               }}
             >
               {/* Real component render — non-interactive so drag stays on the wrapper */}
-              <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', overflow: n.clipContent ? 'hidden' : 'visible' }}>
-                {isContainer && !(n.shader && n.shader.on)
-                  ? ((window.fillBg(n) || window.nodeFx(n))
-                      ? <div style={{ width: '100%', height: '100%', background: window.fillBg(n) || 'transparent', ...window.nodeFx(n) }} />
-                      : null)
-                  : (window.PreviewNode ? <window.PreviewNode node={n} /> : n.label)}
+              <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', overflow: n.clipContent ? 'hidden' : 'visible', ...(clip ? { clipPath: clip, WebkitClipPath: clip } : null) }}>
+                {isMask
+                  ? <MaskOutline node={n} />
+                  : isContainer && !(n.shader && n.shader.on)
+                    ? ((window.fillBg(n) || window.nodeFx(n))
+                        ? <div style={{ width: '100%', height: '100%', background: window.fillBg(n) || 'transparent', ...window.nodeFx(n) }} />
+                        : null)
+                    : (window.PreviewNode ? <window.PreviewNode node={n} /> : n.label)}
               </div>
 
               {/* Floating label — chrome on hover / selection only. Sits above the node, but flips

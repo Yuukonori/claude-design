@@ -1,7 +1,7 @@
-/* global React, AuthProvider, useAuth, useHashRoute, Toaster, Navbar, Footer, FullLoader, navigate, Home, Login, Register, Subscription, Projects, Account, Billing, Team, Market, Plugins, Library */
+/* global React, AuthProvider, useAuth, useHashRoute, Toaster, Navbar, Footer, FullLoader, navigate, Home, Login, Register, Subscription, Projects, Account, Billing, Team, Market, Plugins, Library, AdminPanel */
 
 const AUTH_PAGES = ['/login', '/register'];
-const APP_ROUTES = ['/projects', '/account', '/billing', '/team', '/market', '/plugins', '/library'];
+const APP_ROUTES = ['/projects', '/account', '/billing', '/team', '/market', '/plugins', '/library', '/admin'];
 
 function NotFound() {
   const { Button } = window.LatticeDesignSystem_e801cb;
@@ -27,6 +27,7 @@ function renderPage(path) {
     case '/market': return <Market />;
     case '/plugins': return <Plugins />;
     case '/library': return <Library />;
+    case '/admin': return <AdminPanel />;
     default: return <NotFound />;
   }
 }
@@ -47,6 +48,7 @@ function Shell() {
     if (loading) return;
     if (APP_ROUTES.includes(path) && !user) navigate('/login');
     else if (AUTH_PAGES.includes(path) && user) navigate('/projects');
+    else if (path === '/admin' && user && !user.is_admin) navigate('/projects');
   }, [path, user, loading]);
 
   if (loading) return <FullLoader />;
