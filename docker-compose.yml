@@ -38,6 +38,8 @@ services:
       GITHUB_CLIENT_ID: "${GITHUB_CLIENT_ID:-}"
       GITHUB_CLIENT_SECRET: "${GITHUB_CLIENT_SECRET:-}"
       ADMIN_GITHUB_LOGIN: "Yuukonori"
+      # AI Helper — export GEMINI_API_KEY in your shell (or a root .env) before `docker compose up`.
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
     ports:
       - "5050:5050"
 

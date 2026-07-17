@@ -2,7 +2,21 @@
 // Shared, brand-faithful building blocks for the Lattice product app.
 // Each reads DS primitives from window.LatticeDesignSystem_e801cb inside its own scope.
 
+// Lucide glyphs are filled by a document scan (window.renderLucideIcons, defined in index.html), but
+// index.html only runs it once shortly after boot. Anything that mounts later — every icon inside
+// async-loaded content such as the admin user table or the AI-usage cards — was therefore left as an
+// empty <i>. Each Ic now schedules a scan itself, coalesced to one pass per tick so a list of fifty
+// icons still costs a single querySelectorAll. The scan is idempotent (it skips filled icons).
+let icLucideTimer = null;
+function icLucideScan() {
+  if (icLucideTimer) return;
+  icLucideTimer = setTimeout(function () {
+    icLucideTimer = null;
+    if (window.renderLucideIcons) window.renderLucideIcons();
+  }, 0);
+}
 function Ic({ n, s = 16, style }) {
+  React.useEffect(() => { icLucideScan(); }, [n]);
   return <i data-lucide={n} style={{ width: s, height: s, ...style }}></i>;
 }
 window.Ic = Ic;

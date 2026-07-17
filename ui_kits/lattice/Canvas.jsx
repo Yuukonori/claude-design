@@ -393,9 +393,12 @@ function Canvas({ nodes, connections, settings = {}, artboard, device, selectedI
   // --- Space key pan cursor ---
   React.useEffect(() => {
     const kd = (e) => {
-      if (e.code === 'Space' && !e.repeat && e.target.tagName !== 'INPUT') {
+      // Don't hijack Space while typing in a field (INPUT was excluded before, but TEXTAREA/SELECT/
+      // contentEditable — e.g. the AI Helper composer — were not, which swallowed the space character).
+      const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName || '') || e.target.isContentEditable;
+      if (e.code === 'Space' && !e.repeat && !typing) {
         e.preventDefault(); spaceRef.current = true; setSpaceHeld(true);
-      } else if (e.code === 'Space' && e.repeat) e.preventDefault();
+      } else if (e.code === 'Space' && e.repeat && !typing) e.preventDefault();
     };
     const ku = (e) => { if (e.code === 'Space') { spaceRef.current = false; setSpaceHeld(false); } };
     document.addEventListener('keydown', kd);

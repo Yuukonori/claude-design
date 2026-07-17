@@ -1,0 +1,56 @@
+{
+  "_readme": [
+    "Curated lessons injected into the agent's stage prompts as a '## LESSONS' section.",
+    "",
+    "WHAT BELONGS HERE, AND WHAT DOES NOT:",
+    "The stage prompts (server/prompts/*.txt) hold the PROTOCOL — the ops, the kinds, the rules that",
+    "are always true. This file holds the LONG TAIL: specific things the model has actually been caught",
+    "getting wrong, phrased as a short corrective. Do not restate a prompt rule here. A duplicated rule",
+    "costs tokens on every single call and teaches nothing new — and token bloat is the fastest way to",
+    "make a SMALL model worse, which is the opposite of why this file exists.",
+    "",
+    "Keep each lesson to one sentence, concrete, and about a mistake that actually happened.",
+    "",
+    "FIELDS:",
+    "  key    - stable unique id. Also the dedupe key against the ai_lessons table.",
+    "  stage  - which stage is told: audit | analyze | research | prepare | critique | implement.",
+    "  text   - the sentence injected. Imperative, specific, one line.",
+    "  weight - ranking hint. Curated lessons outrank fresh auto-captured ones by default.",
+    "",
+    "Runtime-learned lessons live in the ai_lessons Postgres table (the container filesystem is",
+    "ephemeral, so nothing can be written back to this file at runtime). Both are merged, ranked and",
+    "capped by server/ai_learning.js before injection."
+  ],
+  "lessons": [
+    {
+      "key": "seed:artboard-is-a-device-setting",
+      "stage": "implement",
+      "text": "The artboard size is a device setting the user controls; there is no page height, width or 'scrollable' property, and setPageProp takes name and route only — never emit one with a height and never claim to have resized anything.",
+      "weight": 100
+    },
+    {
+      "key": "seed:page-length-is-not-a-fault",
+      "stage": "prepare",
+      "text": "The editor has a scroll panel: a landing PAGE is meant to run several screens past the fold, so never drop, merge or shrink a section to make it fit the artboard height.",
+      "weight": 90
+    },
+    {
+      "key": "seed:container-height-is-computed",
+      "stage": "implement",
+      "text": "Containers (frame/stack/card/grid) hug their content — a guessed numeric h is a dead band, not extra room; use padding for air and give h only as 'fill'.",
+      "weight": 90
+    },
+    {
+      "key": "seed:demo-data-ships-as-real",
+      "stage": "implement",
+      "text": "stat/table/chart/icon/list/select render the editor's DEMO content when their props are missing, so a stat with no statValue ships 'Revenue $48.2k' to the user as if it were the design.",
+      "weight": 80
+    },
+    {
+      "key": "seed:refs-die-with-their-block",
+      "stage": "implement",
+      "text": "A ref id you invent is only valid inside the block that created it; to touch anything that already exists use the real id from the CANVAS section.",
+      "weight": 70
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-/* global React, Topbar, PageTabs, LibraryPanel, PagesPanel, LayersTree, Canvas, PreviewCanvas, Inspector, CodePanel, RelationshipsView, WorkflowView, WorkflowRunLog, AnimCanvas */
+/* global React, Topbar, PageTabs, LibraryPanel, PagesPanel, LayersTree, Canvas, PreviewCanvas, Inspector, CodePanel, RelationshipsView, WorkflowView, WorkflowRunLog, AnimCanvas, AIHelper */
 
 const DEFAULT_NODES = [
   { id: 'cmp_root', name: 'Section',      icon: 'frame',  kind: 'frame',   x: 80,  y: 70,  w: 440, h: 150, label: 'Pricing — grid',  layout: 'Grid',        gap: 24, synced: true,  responsive: true,  clipContent: false, locked: false, hidden: false, fillColor: '' },
@@ -124,6 +124,1123 @@ function findOpenSpot(allNodes, w = 200, h = 120) {
         return { x, y };
     }
   return { x: 80, y: allNodes.reduce((m, n) => Math.max(m, n.y + n.h), 0) + M };
+}
+
+// The editor's snap grid, resolved for the executor. `snap:false` (the user turned snapping off) means
+// no grid discipline — round to whole pixels and otherwise leave geometry exactly where layout put it.
+//
+// WHICH AXIS THE GRID OWNS: the vertical one. Heights, padding, gaps and stacked positions all snap, so
+// the page has a real vertical rhythm. WIDTHS DO NOT: a `w:"fill"` child must tile its parent exactly,
+// and half of a 1448 artboard is 724 — not a multiple of 8. Snapping that would either overflow the
+// artboard or leave a seam between two panes. Fill is a harder constraint than the grid, exactly as it
+// is in CSS, so the horizontal axis stays fluid and the vertical axis stays on-grid.
+function agentGrid(g) {
+  const on = !!(g && g.snap);
+  const size = Math.max(1, Math.round((g && g.size) || 8));
+  return {
+    on: on, size: size,
+    // nearest — for positions, where drifting half a step either way is fine
+    to: (v) => (on ? Math.round(v / size) * size : Math.round(v)),
+    // never DOWN — for heights: rounding a hugged height down would clip the content inside it
+    up: (v) => (on ? Math.ceil(v / size) * size : Math.round(v)),
+  };
+}
+
+// A page's scene timeline before anyone configures it. Module-scoped because BOTH the editor's own
+// timeline controls and the agent executor build on it — two copies would drift.
+const SCENE_DEFAULT = { on: true, loop: true, autoplay: true, duration: 2000, tracks: [] };
+// The eases AnimEngine actually implements (its EASE table). An unknown ease silently falls back to
+// ease-out at playback, so an unvalidated one from the model is a lie in the data rather than an error.
+const AGENT_EASES = new Set(['linear', 'ease-in', 'ease-out', 'ease-in-out']);
+const SCENE_MIN_MS = 50, SCENE_MAX_MS = 60000;
+// Fallback for when TimelineEditor.jsx hasn't published its registry (tests, or a load-order change).
+// Deliberately the UNIVERSAL props only: every kind has them, so nothing here can be wrong for a node.
+const AGENT_ANIM_FALLBACK = new Set(['scale', 'rotation', 'x', 'y', 'skewX', 'skewY', 'w', 'h',
+  'opacity', 'fillColor', 'borderColor', 'radius', 'borderWidth', 'label', 'textColor', 'fontSize']);
+// The editor's OWN source of truth for what the timeline can animate (TimelineEditor publishes
+// window.TL_ANIMATABLE = keys of TL_PROP). Reusing it means the agent can never be offered a property
+// the timeline UI itself would refuse — and it can't rot when that list changes.
+function agentAnimatable(prop) {
+  if (!prop) return false;
+  const reg = (typeof window !== 'undefined') ? window.TL_ANIMATABLE : null;
+  if (reg && reg.size) return reg.has(prop);
+  return AGENT_ANIM_FALLBACK.has(prop);
+}
+// Model-authored keyframes -> the shape AnimEngine samples: sorted, unique `t` in MILLISECONDS
+// (absolute, against the clip duration — not 0..1), a known ease, and at least one key. Models reach
+// for percentages and seconds, so a bare 0..1 `t` on a multi-second clip would otherwise collapse the
+// whole animation into its first millisecond.
+function normalizeAgentKeys(raw, duration) {
+  const list = Array.isArray(raw) ? raw : [];
+  const byT = new Map();
+  for (let i = 0; i < list.length; i++) {
+    const k = list[i];
+    if (!k || typeof k !== 'object') continue;
+    if (k.value === undefined || k.value === null || k.value === '') continue;
+    // Percent FIRST: Number("50%") is NaN, so a finite-check before this branch silently drops the key
+    // instead of converting it. A percent is explicit about meaning a fraction of the clip, so honour
+    // it; a bare number is always milliseconds, which is the unit AnimEngine actually samples.
+    const rawT = k.t != null ? k.t : k.time;
+    let t;
+    if (typeof rawT === 'string' && /%\s*$/.test(rawT)) {
+      const pct = parseFloat(rawT);
+      if (!Number.isFinite(pct)) continue;
+      t = (pct / 100) * duration;
+    } else {
+      t = Number(rawT);
+      if (!Number.isFinite(t)) continue;
+    }
+    t = Math.max(0, Math.min(duration, Math.round(t)));
+    const ease = AGENT_EASES.has(String(k.ease)) ? String(k.ease) : 'ease-out';
+    byT.set(t, { t: t, value: k.value, ease: ease });   // last write wins on a duplicate t
+  }
+  return Array.from(byT.values()).sort((a, b) => a.t - b.t);
+}
+
+// --- AI agent executor -------------------------------------------------------------------------
+// Apply a batch of AI-agent actions to a working COPY of the project's pages. Pure (no React state):
+// returns a fresh pages array + the resulting active page id + a summary, so the caller commits it in
+// one undo step. Agent-supplied ref ids (e.g. "sidebar") are mapped to real generated ids so later
+// actions can reference nodes the same batch created; existing node ids pass through untouched.
+// A node has at most ONE parent, so adding a child edge REPLACES any existing one. Models routinely
+// emit both `parent` on addNode and a separate connect op for the same pair; duplicate edges make
+// sibling counts and subtree moves double-count, which throws the whole layout out.
+function setChildEdge(pg, from, to) {
+  pg.connections = pg.connections.filter(c => !(c.kind === 'child' && c.to === to));
+  pg.connections.push({ from: from, to: to, kind: 'child' });
+}
+
+// `priorRefs` carries the ref->real-id map from earlier batches in the same conversation. The model
+// has chat memory, so it naturally says "setProp btn1" about a button it created last turn — but a ref
+// only ever existed inside the block that made it, so that silently no-opped ("couldn't apply them").
+// Seeding the map makes the model's own mental model true. A ref reused by a new addNode simply
+// rebinds, so newer always wins.
+function buildAgentPages(prevPages, activeId, actions, priorRefs, project) {
+  const pages = prevPages.map(p => ({ ...p, nodes: (p.nodes || []).map(n => ({ ...n })), connections: [...(p.connections || [])] }));
+  let active = activeId;
+  const idMap = { ...(priorRefs || {}) };   // AI ref id -> real editor id (nodes, pages, vars, workflows, components)
+  // Project-level state the agent can also edit. Cloned so buildAgentPages stays pure; the `*Changed`
+  // flags tell the caller which of these to write back (each lives in its OWN React state, and page
+  // vars live on the page objects above). Global variables ≠ page variables.
+  const proj = project || {};
+  let variables = (proj.variables || []).map(v => ({ ...v }));
+  let workflows = (proj.workflows || []).map(w => ({ ...w }));
+  let customComponents = (proj.customComponents || []).map(c => ({ ...c }));
+  let globalVarsChanged = false, workflowsChanged = false, componentsChanged = false;
+  // The real artboard the user is looking at (desktop 1440, tablet 820, mobile 390, or a custom size).
+  // Top-level nodes size/flow/clamp against THIS, not a hardcoded desktop width — otherwise a page built
+  // on a phone artboard comes out 1440 wide.
+  const artW = Math.round((proj.artboard && proj.artboard.w) || AGENT_ARTBOARD_W);
+  const artH = Math.round((proj.artboard && proj.artboard.h) || AGENT_ARTBOARD_H);
+  // The editor's snap grid (settings.snap + settings.gridSize, default 8). Canvas.jsx snaps every user
+  // drag to it, so agent output that ignores it is off-grid the instant it lands: nudge an agent-made
+  // node by 1px and it jumps to the nearest multiple. Laying the batch out on the SAME grid is what
+  // makes agent work indistinguishable from hand-placed work.
+  const grid = agentGrid(proj.grid);
+  const newNodeIds = [];
+  const fillW = new Set();                  // nodes that asked for w:"fill" — resolved in the layout pass
+  const fillH = new Set();                  // nodes that asked for h:"fill" — a screen root that must span the artboard
+  const newByPage = {};                     // pageId -> how many new nodes landed there
+  const counts = { addNode: 0, setProp: 0, deleteNode: 0, addPage: 0, connect: 0, deletePage: 0, setPageProp: 0,
+    moveNode: 0, addVar: 0, setVar: 0, deleteVar: 0, addWorkflow: 0, editWorkflow: 0, deleteWorkflow: 0, addComponent: 0,
+    setTimeline: 0, addTrack: 0, deleteTrack: 0 };
+  const cur = () => pages.find(p => p.id === active) || pages[0];
+  const resolve = (ref) => (ref == null ? null : (idMap[ref] || ref));
+  // A page reference can arrive under a few keys depending on how the model frames the op.
+  const pageRefOf = (a) => (a.target != null ? a.target : (a.page != null ? a.page : a.id));
+  // Targets can legitimately live on another page, and models also invent ids — resolve against the
+  // current page first, then anywhere, and record what never resolved so the caller can say so.
+  const missing = [];
+  const unknownOps = [];   // ops the executor has no handler for — surfaced, never silently dropped
+  const pageWith = (id) => (cur().nodes.some(n => n.id === id) ? cur() : pages.find(p => p.nodes.some(n => n.id === id)));
+  const list = Array.isArray(actions) ? actions : [];
+  for (let a of list) {
+    if (!a || typeof a !== 'object') continue;
+    // A custom component is a single-node variant (a `base` kind + captured props). Instantiating one is
+    // just an addNode with those props merged in — rewrite it so the whole layout/placement path is reused.
+    if (a.op === 'placeComponent') {
+      const cc = customComponents.find(c => c.id === resolve(a.component) || c.name === a.component);
+      if (!cc) { missing.push(String(a.component != null ? a.component : 'component')); continue; }
+      a = { op: 'addNode', kind: cc.base, id: a.id, name: a.name || cc.name, label: a.label,
+        page: a.page, parent: a.parent, x: a.x, y: a.y, w: a.w, h: a.h,
+        props: Object.assign({}, cc.props || {}, a.props || {}) };
+    }
+    if (a.op === 'addPage') {
+      const id = uid('page');
+      if (a.id) idMap[a.id] = id;
+      pages.push({ id, name: a.name || 'Page', route: a.route || '/', nodes: [], connections: [], vars: [] });
+      if (a.activate !== false) active = id;
+      counts.addPage++;
+    } else if (a.op === 'deletePage') {
+      // Pages are real ids in the context; a page the model just created resolves through idMap too.
+      const raw = pageRefOf(a);
+      const pid = resolve(raw);
+      const idx = pages.findIndex(p => p.id === pid);
+      // Never remove the last page — the editor must always have somewhere to land.
+      if (idx >= 0 && pages.length > 1) {
+        pages.splice(idx, 1);
+        if (active === pid) active = pages[0].id;
+        counts.deletePage++;
+      } else missing.push(String(raw));
+    } else if (a.op === 'setPageProp') {
+      // Rename a page and/or change its route. name/route may arrive top-level or nested under props.
+      const raw = pageRefOf(a);
+      const p = pages.find(pp => pp.id === (resolve(raw) || active));
+      if (p) {
+        const pr = a.props || {};
+        const name = a.name != null ? a.name : pr.name;
+        const route = a.route != null ? a.route : pr.route;
+        if (name != null) p.name = String(name);
+        if (route != null) p.route = String(route);
+        if (name != null || route != null) counts.setPageProp++;
+        // A page has EXACTLY name + route. Anything else the model asks for here does not exist —
+        // there is no page/canvas height, width or scroll property (the artboard is a DEVICE setting,
+        // see `artboard` in App: activeDevice + settings.customSize). Reaching for one used to be a
+        // SILENT no-op: the page resolved, nothing was written, nothing was counted, nothing was
+        // reported — so the agent could announce "I updated the canvas height to 2600px" and the batch
+        // still read as success. Surface it instead, and let the helper say it's out of scope.
+        for (const k in pr) {
+          if (k === 'name' || k === 'route') continue;
+          unknownOps.push('setPageProp:' + k);
+        }
+        for (const k of ['height', 'h', 'width', 'w', 'scrollable', 'scroll', 'size']) {
+          if (a[k] !== undefined) unknownOps.push('setPageProp:' + k);
+        }
+      } else missing.push(String(raw));
+    } else if (a.op === 'setTimeline') {
+      // The page's scene clip: one whole-screen animation whose tracks each drive one node's property.
+      // Settings only — tracks are owned by addTrack/deleteTrack.
+      const raw = pageRefOf(a);
+      const p = pages.find(pp => pp.id === (resolve(raw) || active));
+      if (p) {
+        const src = a.props || a;
+        const tl = { ...SCENE_DEFAULT, ...(p.timeline || {}), tracks: [...((p.timeline && p.timeline.tracks) || [])] };
+        let touched = false;
+        if (src.on != null) { tl.on = !!src.on; touched = true; }
+        if (src.loop != null) { tl.loop = !!src.loop; touched = true; }
+        if (src.autoplay != null) { tl.autoplay = !!src.autoplay; touched = true; }
+        if (src.duration != null) {
+          const d = Math.round(Number(src.duration));
+          if (Number.isFinite(d) && d > 0) { tl.duration = Math.max(SCENE_MIN_MS, Math.min(SCENE_MAX_MS, d)); touched = true; }
+        }
+        if (touched) { p.timeline = tl; counts.setTimeline++; }
+      } else missing.push(String(raw));
+    } else if (a.op === 'addTrack') {
+      // One track = one node's ONE property over time. Re-adding the same node+prop REPLACES it, which
+      // matches the editor (sceneAddTrack refuses a duplicate) and makes a re-run idempotent instead of
+      // stacking two tracks that fight over the same property.
+      const tid = resolve(a.target != null ? a.target : a.node);
+      const pg = (tid && pageWith(tid)) || cur();
+      const node = tid ? pg.nodes.find(n => n.id === tid) : null;
+      const prop = String(a.prop || '');
+      if (!node) missing.push(String(a.target != null ? a.target : a.node));
+      else if (!agentAnimatable(prop)) unknownOps.push('addTrack:' + (prop || 'noProp'));
+      else {
+        const tl = { ...SCENE_DEFAULT, ...(pg.timeline || {}), tracks: [...((pg.timeline && pg.timeline.tracks) || [])] };
+        const keys = normalizeAgentKeys(a.keys, tl.duration);
+        // A track with no usable key animates nothing but still renders a row in the timeline editor —
+        // report it rather than leave the user a phantom track to clean up.
+        if (!keys.length) missing.push(String(a.target != null ? a.target : a.node) + '.' + prop);
+        else {
+          tl.tracks = tl.tracks.filter(tr => !(tr.nodeId === tid && tr.prop === prop));
+          tl.tracks.push({ nodeId: tid, prop: prop, keys: keys });
+          pg.timeline = tl;
+          counts.addTrack++;
+        }
+      }
+    } else if (a.op === 'deleteTrack') {
+      const tid = resolve(a.target != null ? a.target : a.node);
+      const pg = (tid && pageWith(tid)) || cur();
+      const prop = a.prop != null ? String(a.prop) : null;
+      const tl = { ...SCENE_DEFAULT, ...(pg.timeline || {}), tracks: [...((pg.timeline && pg.timeline.tracks) || [])] };
+      const before = tl.tracks.length;
+      // No prop = drop every track on that node (what "stop animating the hero" means).
+      tl.tracks = tl.tracks.filter(tr => !(tr.nodeId === tid && (prop == null || tr.prop === prop)));
+      if (tl.tracks.length !== before) { pg.timeline = tl; counts.deleteTrack += before - tl.tracks.length; }
+      else missing.push(String(a.target != null ? a.target : a.node) + (prop ? '.' + prop : ''));
+    } else if (a.op === 'addNode') {
+      const kind = (a.kind && KIND_DEFAULTS[a.kind]) ? a.kind : 'frame';
+      const d = KIND_DEFAULTS[kind] || {};
+      const ap = normalizeAgentProps(a.props);
+      // `page` lets a node target a page explicitly. Without it, a model that emits every addPage
+      // first and every addNode after would dump ALL the content on the last page it created.
+      const pageRef = a.page != null ? resolve(a.page) : null;
+      const pg = (pageRef && pages.find(p => p.id === pageRef)) || cur();
+      const parent = resolve(a.parent);
+      const parentNode = parent ? pg.nodes.find(n => n.id === parent) : null;
+      const pad = parentNode && parentNode.padding != null ? parentNode.padding : 16;
+      const gap = parentNode && parentNode.gap != null ? parentNode.gap : 8;
+      // Size: an explicit number wins; "fill" spans the parent's inner box (models are far more
+      // reliable saying "fill" than doing `1168 - 2*16` arithmetic); otherwise the kind default.
+      const rawW = (a.w != null ? a.w : ap.w);
+      const rawH = (a.h != null ? a.h : ap.h);
+      const fitW = parentNode ? Math.max(24, parentNode.w - pad * 2) : artW;
+      const fitH = parentNode ? Math.max(24, parentNode.h - pad * 2) : artH;
+      const sizeOf = (raw, fit, def) => {
+        if (raw === 'fill' || raw === '100%') return fit;
+        const n = (raw === '' || raw == null) ? NaN : Number(raw);
+        return Number.isFinite(n) && n > 0 ? n : def;
+      };
+      let w = sizeOf(rawW, fitW, d.w || 200);
+      let h = sizeOf(rawH, fitH, d.h || 120);
+      if (parentNode && rawW == null) {
+        // Containers stacked in a column stretch to the parent's inner width (align-items:stretch).
+        // Not in a row (siblings sit beside each other) and not in a Grid (the grid flow assigns
+        // column widths itself).
+        if (AGENT_STRETCH_KINDS[kind] && parentNode.layout !== 'Flex row' && parentNode.layout !== 'Grid') {
+          w = fitW;
+        } else if (fitW > 24 && w > fitW) {
+          // A child sized only by its kind-default can still be wider than its container (a 260px
+          // heading inside a 240px sidebar) — shrink it to fit rather than overflow.
+          w = fitW;
+        }
+      }
+      // Nodes live at absolute coords (parent/child is a hierarchy edge, not DOM nesting), so placement
+      // is resolved here. Model-supplied coordinates are only trusted when they're actually sensible —
+      // models routinely hand every node the same x/y (all 0,0) or position a child outside its parent.
+      let spot = null;
+      if (a.x != null && a.y != null) {
+        const p = { x: +a.x, y: +a.y };
+        if (parentNode) {
+          // Trust a child's coords only if they land inside the parent; else fall through to auto-layout.
+          const inside = p.x >= parentNode.x && p.y >= parentNode.y &&
+            p.x + w <= parentNode.x + parentNode.w && p.y + h <= parentNode.y + parentNode.h;
+          if (inside) spot = p;
+        } else {
+          // Take a top-level node's coords as a hint — relayoutAgentBatch resolves any overlap
+          // afterwards, artboard-aware (slide right, else drop below). Don't send it to findOpenSpot
+          // here: that tiles by the node's own width and marches wide nodes clean off the canvas.
+          spot = p;
+        }
+      }
+      if (!spot) {
+        if (parentNode) {
+          // Stack inside the parent, after its existing children, along its layout axis. Measured from
+          // the siblings' real extent (not count × own height) so mixed-height children don't drift.
+          const kids = pg.connections.filter(c => c.kind === 'child' && c.from === parent)
+            .map(c => pg.nodes.find(n => n.id === c.to)).filter(Boolean);
+          if (parentNode.layout === 'Flex row') {
+            const right = kids.length ? Math.max.apply(null, kids.map(k => k.x + k.w)) : parentNode.x + pad - gap;
+            spot = { x: right + gap, y: parentNode.y + pad };
+          } else {
+            const bottom = kids.length ? Math.max.apply(null, kids.map(k => k.y + k.h)) : parentNode.y + pad - gap;
+            spot = { x: parentNode.x + pad, y: bottom + gap };
+          }
+        } else {
+          spot = findOpenSpot(pg.nodes, w, h);
+        }
+      }
+      const id = uid();
+      if (a.id) idMap[a.id] = id;
+      // Remember the intent — the final width is only knowable once the parent's own width settles.
+      if (rawW === 'fill' || rawW === '100%') fillW.add(id);
+      if (rawH === 'fill' || rawH === '100%') fillH.add(id);
+      const name = a.name || (kind.charAt(0).toUpperCase() + kind.slice(1));
+      const node = {
+        name, icon: 'square', layout: 'Flex column', gap: 12,
+        synced: false, responsive: true, clipContent: false, locked: false, hidden: false, fillColor: '',
+        ...d, ...ap,
+        id, kind, x: spot.x, y: spot.y, w, h,
+      };
+      if (a.label != null) node.label = a.label;
+      else if (node.label === undefined) node.label = '';
+      pg.nodes.push(node);
+      newNodeIds.push(id);
+      newByPage[pg.id] = (newByPage[pg.id] || 0) + 1;
+      if (parentNode) setChildEdge(pg, parent, id);
+      counts.addNode++;
+    } else if (a.op === 'setProp') {
+      const tid = resolve(a.target);
+      const pg = pageWith(tid);
+      const i = pg ? pg.nodes.findIndex(n => n.id === tid) : -1;
+      if (i >= 0) { pg.nodes[i] = { ...pg.nodes[i], ...normalizeAgentProps(a.props) }; counts.setProp++; }
+      else missing.push(String(a.target));
+    } else if (a.op === 'deleteNode') {
+      const tid = resolve(a.target);
+      const pg = pageWith(tid);
+      if (pg) {
+        const before = pg.nodes.length;
+        pg.nodes = pg.nodes.filter(n => n.id !== tid);
+        pg.connections = pg.connections.filter(c => c.from !== tid && c.to !== tid);
+        if (pg.nodes.length !== before) counts.deleteNode++;
+      } else missing.push(String(a.target));
+    } else if (a.op === 'connect') {
+      const from = resolve(a.from), to = resolve(a.to);
+      // Look on whichever page actually holds both nodes — by now `active` may have moved on.
+      const pg = pages.find(p => p.nodes.some(n => n.id === from) && p.nodes.some(n => n.id === to)) || cur();
+      if (from && to && pg.nodes.some(n => n.id === from) && pg.nodes.some(n => n.id === to)) {
+        const kind = a.kind || 'child';
+        if (kind === 'child') setChildEdge(pg, from, to);            // replaces, never duplicates
+        else if (!pg.connections.some(c => c.kind === kind && c.from === from && c.to === to)) {
+          pg.connections.push({ from: from, to: to, kind: kind });
+        }
+        counts.connect++;
+      }
+    } else if (a.op === 'moveNode') {
+      // Relocate a node (and its whole child-subtree) to another page — the real "merge these pages" move.
+      const nid = resolve(a.target);
+      const from = pages.find(p => p.nodes.some(n => n.id === nid));
+      const dest = pages.find(p => p.id === resolve(a.page));
+      if (from && dest && from.id !== dest.id) {
+        const kids = {};
+        from.connections.filter(c => c.kind === 'child').forEach(c => { (kids[c.from] = kids[c.from] || []).push(c.to); });
+        const moveSet = new Set();
+        (function collect(id) { if (moveSet.has(id)) return; moveSet.add(id); (kids[id] || []).forEach(collect); })(nid);
+        const moved = from.nodes.filter(n => moveSet.has(n.id));
+        const internal = from.connections.filter(c => moveSet.has(c.from) && moveSet.has(c.to));
+        from.nodes = from.nodes.filter(n => !moveSet.has(n.id));
+        // Drop every source edge touching the moved set (external parent/binds are severed — a cross-page
+        // relationship isn't valid anyway); carry the internal edges across.
+        from.connections = from.connections.filter(c => !moveSet.has(c.from) && !moveSet.has(c.to));
+        // Land the moved root in free space on the destination and shift the whole subtree by that delta.
+        const root = moved.find(n => n.id === nid);
+        const spot = findOpenSpot(dest.nodes, root.w, root.h);
+        const dx = spot.x - root.x, dy = spot.y - root.y;
+        moved.forEach(n => { n.x += dx; n.y += dy; });
+        dest.nodes.push(...moved);
+        dest.connections.push(...internal);
+        const par = a.parent != null ? resolve(a.parent) : null;
+        if (par && dest.nodes.some(n => n.id === par && !moveSet.has(n.id))) setChildEdge(dest, par, nid);
+        counts.moveNode++;
+      } else if (!from || !dest) missing.push(String(a.target));
+    } else if (a.op === 'addVar') {
+      // scope 'page' → the target/active page's own vars; otherwise a global variable.
+      const id = uid('var');
+      if (a.id) idMap[a.id] = id;
+      const v = { id, name: a.name || 'var', type: (a.type === 'number' || a.type === 'boolean') ? a.type : 'string',
+        initial: a.initial != null ? a.initial : '' };
+      if ((a.scope || 'global') === 'page') {
+        const pg = (a.page != null && pages.find(p => p.id === resolve(a.page))) || cur();
+        pg.vars = [...(pg.vars || []), v];
+      } else { variables = [...variables, v]; globalVarsChanged = true; }
+      counts.addVar++;
+    } else if (a.op === 'setVar') {
+      const vid = resolve(a.target);
+      const upd = (v) => ({ ...v,
+        ...(a.name != null ? { name: String(a.name) } : {}),
+        ...(a.type != null ? { type: (a.type === 'number' || a.type === 'boolean') ? a.type : 'string' } : {}),
+        ...(a.initial !== undefined ? { initial: a.initial } : {}) });
+      if (variables.some(v => v.id === vid)) { variables = variables.map(v => v.id === vid ? upd(v) : v); globalVarsChanged = true; counts.setVar++; }
+      else {
+        const pg = pages.find(p => (p.vars || []).some(v => v.id === vid));
+        if (pg) { pg.vars = pg.vars.map(v => v.id === vid ? upd(v) : v); counts.setVar++; }
+        else missing.push(String(a.target));
+      }
+    } else if (a.op === 'deleteVar') {
+      const vid = resolve(a.target);
+      if (variables.some(v => v.id === vid)) { variables = variables.filter(v => v.id !== vid); globalVarsChanged = true; counts.deleteVar++; }
+      else {
+        const pg = pages.find(p => (p.vars || []).some(v => v.id === vid));
+        if (pg) { pg.vars = pg.vars.filter(v => v.id !== vid); counts.deleteVar++; }
+        else missing.push(String(a.target));
+      }
+    } else if (a.op === 'addWorkflow') {
+      const id = uid('wf');
+      if (a.id) idMap[a.id] = id;
+      // Matches the editor's own new-workflow shape (one trigger node, no edges). Wiring the graph is
+      // not an agent op yet — the model can create/name/remove flows, the user wires them.
+      workflows = [...workflows, { id, name: a.name || ('Workflow ' + (workflows.length + 1)),
+        nodes: [{ id: uid('wn'), type: 'trigger', x: 80, y: 120 }], edges: [] }];
+      workflowsChanged = true; counts.addWorkflow++;
+    } else if (a.op === 'renameWorkflow') {
+      const wid = resolve(a.target);
+      if (a.name != null && workflows.some(w => w.id === wid)) {
+        workflows = workflows.map(w => w.id === wid ? { ...w, name: String(a.name) } : w);
+        workflowsChanged = true; counts.editWorkflow++;
+      } else missing.push(String(a.target));
+    } else if (a.op === 'deleteWorkflow') {
+      const wid = resolve(a.target);
+      if (workflows.some(w => w.id === wid)) {
+        workflows = workflows.filter(w => w.id !== wid);
+        workflowsChanged = true; counts.deleteWorkflow++;
+      } else missing.push(String(a.target));
+    } else if (a.op === 'createComponent') {
+      // Capture an existing node's styling into a reusable Library component (mirrors confirmSaveAsComponent).
+      const nid = resolve(a.target);
+      const holder = pages.find(p => p.nodes.some(n => n.id === nid));
+      const node = holder && holder.nodes.find(n => n.id === nid);
+      if (node) {
+        const id = uid('cc');
+        if (a.id) idMap[a.id] = id;
+        customComponents = [...customComponents, {
+          id, name: a.name || node.name || 'Component', icon: node.icon || 'shapes',
+          base: node.kind || 'frame', props: captureVariantProps(node),
+        }];
+        componentsChanged = true; counts.addComponent++;
+      } else missing.push(String(a.target));
+    } else if (a.op) {
+      unknownOps.push(String(a.op));
+    }
+  }
+  // Land the user where the content actually went: stay put if their own page got content, otherwise
+  // open the FIRST page that did. Without this, a batch creating several pages leaves them staring at
+  // whichever page happened to be created last — often an empty one.
+  const landed = Object.keys(newByPage);
+  if (landed.length) active = newByPage[activeId] ? activeId : landed[0];
+  // The executor owns layout, not the model — grow containers and flow new top-level nodes clear of
+  // existing work. Without this, model-supplied coordinates land charts on top of sidebars.
+  const newIdSet = new Set(newNodeIds);
+  if (newNodeIds.length) {
+    pages.forEach(p => {
+      if ((p.nodes || []).some(n => newIdSet.has(n.id))) {
+        relayoutAgentBatch(p, newIdSet, fillW, artW, fillH, artH, grid);
+        harmonizeAgentStyle(p.nodes, newIdSet); // unify radius/border per kind so the page reads as one system
+      }
+    });
+  }
+
+  const parts = [];
+  if (counts.addPage) parts.push('+' + counts.addPage + ' page' + (counts.addPage > 1 ? 's' : ''));
+  if (counts.deletePage) parts.push('−' + counts.deletePage + ' page' + (counts.deletePage > 1 ? 's' : ''));
+  if (counts.setPageProp) parts.push(counts.setPageProp + ' page edit' + (counts.setPageProp > 1 ? 's' : ''));
+  if (counts.addNode) parts.push('+' + counts.addNode + ' node' + (counts.addNode > 1 ? 's' : ''));
+  if (counts.setProp) parts.push(counts.setProp + ' edit' + (counts.setProp > 1 ? 's' : ''));
+  if (counts.deleteNode) parts.push('−' + counts.deleteNode + ' node' + (counts.deleteNode > 1 ? 's' : ''));
+  if (counts.connect) parts.push(counts.connect + ' link' + (counts.connect > 1 ? 's' : ''));
+  if (counts.addTrack) parts.push('+' + counts.addTrack + ' anim track' + (counts.addTrack > 1 ? 's' : ''));
+  if (counts.deleteTrack) parts.push('−' + counts.deleteTrack + ' anim track' + (counts.deleteTrack > 1 ? 's' : ''));
+  if (counts.setTimeline) parts.push('timeline updated');
+  if (counts.moveNode) parts.push(counts.moveNode + ' moved');
+  const varN = counts.addVar + counts.setVar + counts.deleteVar;
+  if (varN) parts.push(varN + ' variable' + (varN > 1 ? 's' : ''));
+  const wfN = counts.addWorkflow + counts.editWorkflow + counts.deleteWorkflow;
+  if (wfN) parts.push(wfN + ' workflow' + (wfN > 1 ? 's' : ''));
+  if (counts.addComponent) parts.push('+' + counts.addComponent + ' component' + (counts.addComponent > 1 ? 's' : ''));
+  const total = counts.addNode + counts.setProp + counts.deleteNode + counts.addPage + counts.connect
+    + counts.deletePage + counts.setPageProp + counts.moveNode
+    + counts.addVar + counts.setVar + counts.deleteVar
+    + counts.addWorkflow + counts.editWorkflow + counts.deleteWorkflow + counts.addComponent
+    + counts.setTimeline + counts.addTrack + counts.deleteTrack;
+  // Undo is a per-page nodes+connections snapshot (see pushHistory), so anything that lives ANYWHERE
+  // else is not restored by Ctrl+Z: the scene timeline, variables, workflows, components, the page list.
+  // The action bubble used to promise "Ctrl+Z to undo" unconditionally, which for a timeline-only batch
+  // is simply false — the same shape of lie as a handler that accepts an op and ignores its payload.
+  const outsideUndo = ['setTimeline', 'addTrack', 'deleteTrack', 'addVar', 'setVar', 'deleteVar',
+    'addWorkflow', 'editWorkflow', 'deleteWorkflow', 'addComponent', 'addPage', 'deletePage', 'setPageProp']
+    .some(k => counts[k] > 0);
+  const inUndo = ['addNode', 'setProp', 'deleteNode', 'connect', 'moveNode'].some(k => counts[k] > 0);
+  // `refs` goes back to the caller so the next batch in this conversation can resolve the same refs.
+  // `unknownOps` lets the caller tell the user honestly when the model asked for something we can't do
+  // yet instead of dropping it and reporting a hollow success. The project-state copies + their `*Changed`
+  // flags let the caller write back only what actually changed (each is a separate React state).
+  return { pages, active, summary: parts.length ? parts.join(' · ') : 'No changes', total, newNodeIds, missing, unknownOps, refs: idMap,
+    variables, workflows, customComponents, globalVarsChanged, workflowsChanged, componentsChanged,
+    // 'full' = Ctrl+Z restores everything this batch did. 'partial' = it restores the canvas edits only.
+    // 'none' = Ctrl+Z will not undo any of it.
+    undoScope: outsideUndo ? (inUndo ? 'partial' : 'none') : 'full' };
+}
+
+// Props the agent should see so it can read/rewrite real content (table rows/columns, chart series,
+// list/select items) and match existing styling, rather than guessing. Kept tight — every key here is
+// spent on every node in the context window.
+const AGENT_DATA_KEYS = ['tableCols', 'tableRows', 'chartType', 'chartData', 'itemsText', 'optionsText',
+  'tabsText', 'placeholder', 'checked', 'src', 'href', 'iconName',
+  'variant', 'btnSize', 'tone', 'fillColor', 'textColor', 'fontSize', 'radius', 'layout', 'gap', 'padding',
+  'justify', 'align', 'position', 'anchor'];
+const AGENT_MAX_NODES = 40;
+// A container child stacked in a column should span its parent — CSS's align-items:stretch. Without
+// this, a grid the model didn't give an explicit width keeps its 300px KIND default, so a 3-column
+// product grid inside a 1180px page renders ~84px cards squashed into the corner.
+const AGENT_STRETCH_KINDS = { frame: 1, stack: 1, grid: 1, card: 1, divider: 1, table: 1, chart: 1 };
+
+// --- Free / anchored placement (CSS `position:absolute`) -----------------------------------------
+// Until this existed, EVERY child was force-flowed onto its parent's axis: step 3 of the layout pass
+// overwrote whatever x/y a node was created with. That made a whole class of design impossible rather
+// than merely hard — a dialog centred on a desktop, an icon at a chosen spot, a badge pinned to a
+// card's corner, a FAB in the bottom-right. The model could only ever stack, so it stacked things that
+// should float, which is what "the agent doesn't know where to put components" actually was.
+//
+// The model states INTENT (`anchor:"center"`), never arithmetic. That is the same division of labour as
+// the rest of this executor: models are unreliable at 2D maths, so they say what they mean and the
+// layout pass computes it. A raw x/y still works via `position:"free"` for the cases where the model
+// genuinely knows a coordinate (a desktop icon grid it is placing deliberately).
+const AGENT_ANCHORS = {
+  'top-left': [0, 0], 'top': [0.5, 0], 'top-center': [0.5, 0], 'top-right': [1, 0],
+  'left': [0, 0.5], 'center-left': [0, 0.5], 'center': [0.5, 0.5], 'middle': [0.5, 0.5],
+  'right': [1, 0.5], 'center-right': [1, 0.5],
+  'bottom-left': [0, 1], 'bottom': [0.5, 1], 'bottom-center': [0.5, 1], 'bottom-right': [1, 1],
+};
+function agentAnchor(v) {
+  const k = String(v == null ? '' : v).toLowerCase().trim().replace(/\s+/g, '-');
+  return Object.prototype.hasOwnProperty.call(AGENT_ANCHORS, k) ? k : null;
+}
+// A node is out of the flow if it anchors itself or explicitly asks to be free/absolute.
+function agentIsFree(n) {
+  if (!n) return false;
+  const p = String(n.position || '').toLowerCase();
+  return p === 'free' || p === 'absolute' || p === 'fixed' || !!agentAnchor(n.anchor);
+}
+// Place a free child against its parent's box. `anchor` picks the reference corner/edge; offsetX/offsetY
+// nudge from there (a dialog 24px off the bottom-right). No anchor => keep the coords it was created
+// with, clamped inside the parent so a guessed number can't put it off-canvas.
+function placeFreeChild(parent, k, pad) {
+  const a = agentAnchor(k.anchor);
+  const ox = Number(k.offsetX) || 0, oy = Number(k.offsetY) || 0;
+  let x = k.x, y = k.y;
+  if (a) {
+    const [fx, fy] = AGENT_ANCHORS[a];
+    // Inset by padding at the edges, but never at the centre — a centred node is centred, not nudged.
+    const insetX = fx === 0.5 ? 0 : (fx === 0 ? pad : -pad);
+    const insetY = fy === 0.5 ? 0 : (fy === 0 ? pad : -pad);
+    x = parent.x + Math.round((parent.w - k.w) * fx) + insetX + ox;
+    y = parent.y + Math.round((parent.h - k.h) * fy) + insetY + oy;
+  }
+  // Clamp inside the parent. A free node is still INSIDE its container — free means "not in the flow",
+  // not "allowed off the artboard".
+  x = Math.max(parent.x, Math.min(x, parent.x + parent.w - k.w));
+  y = Math.max(parent.y, Math.min(y, parent.y + parent.h - k.h));
+  return { x: Math.round(x), y: Math.round(y) };
+}
+
+// Models reach for CSS names (`color`, `backgroundColor`, `borderRadius`) and CSS values
+// (fontWeight 700, fontFamily "serif") because that is what their training is full of. This editor's
+// vocabulary differs, and an unknown prop is silently ignored — which is how a fully-researched cream
+// /red palette reached the canvas as no colour at all. Translate rather than fight it: prompt wording
+// drifts every time a model is swapped, this mapping doesn't.
+const AGENT_PROP_ALIAS = {
+  color: 'textColor', fontcolor: 'textColor', foreground: 'textColor', textcolour: 'textColor',
+  background: 'fillColor', backgroundcolor: 'fillColor', bg: 'fillColor', fill: 'fillColor', fillcolour: 'fillColor',
+  borderradius: 'radius', cornerradius: 'radius', rounded: 'radius',
+  bordercolour: 'borderColor', strokecolor: 'borderColor', strokewidth: 'borderWidth',
+  weight: 'fontWeight', size: 'fontSize', font: 'fontFamily', family: 'fontFamily',
+  placeholdertext: 'placeholder', text: 'label', title: 'label', value: 'value',
+  // content props — the model reaches for the short names; the editor reads the *Text ones, so an
+  // un-aliased `options`/`items`/`tabs` was dropped and the component showed its kind default (a
+  // Role select rendered "One, Two, Three").
+  options: 'optionsText', option: 'optionsText', choices: 'optionsText',
+  items: 'itemsText', list: 'itemsText', listitems: 'itemsText',
+  tabs: 'tabsText', tablist: 'tabsText',
+  // Main/cross-axis distribution. The model writes the CSS names it was trained on; the editor's props
+  // are the short ones, and the layout pass bakes them into coordinates.
+  justifycontent: 'justify', alignitems: 'align', alignself: 'align',
+  // Free/anchored placement. `pin`/`place` because a model reaching for absolute positioning rarely
+  // reaches for our exact word for it.
+  pin: 'anchor', place: 'anchor', anchorto: 'anchor', positioning: 'position',
+  offsetx: 'offsetX', offsety: 'offsetY', dx: 'offsetX', dy: 'offsetY',
+};
+const AGENT_FONT_WEIGHT = {
+  '100': 'regular', '200': 'regular', '300': 'regular', '400': 'regular', '500': 'medium',
+  '600': 'semibold', '700': 'bold', '800': 'bold', '900': 'bold',
+  normal: 'regular', regular: 'regular', book: 'regular', medium: 'medium',
+  semibold: 'semibold', demibold: 'semibold', bold: 'bold', bolder: 'bold', heavy: 'bold', black: 'bold',
+};
+const AGENT_FONT_FAMILY = {
+  serif: 'Serif display', 'serif display': 'Serif display', georgia: 'Serif display', times: 'Serif display',
+  mono: 'Mono', monospace: 'Mono', 'ui-monospace': 'Mono', courier: 'Mono',
+  system: 'System', 'system-ui': 'System',
+  sans: 'Grotesk (UI)', 'sans-serif': 'Grotesk (UI)', inter: 'Grotesk (UI)', 'grotesk (ui)': 'Grotesk (UI)',
+};
+// CSS box-alignment values -> the editor's vocabulary (Inspector.jsx:353-354). An unrecognised value is
+// dropped by the layout pass, so `justify:"flex-start"` would silently mean "no distribution at all".
+const AGENT_JUSTIFY = {
+  'flex-start': 'start', flexstart: 'start', start: 'start', top: 'start', left: 'start', normal: 'start',
+  'flex-end': 'end', flexend: 'end', end: 'end', bottom: 'end', right: 'end',
+  center: 'center', centre: 'center', middle: 'center',
+  'space-between': 'space-between', spacebetween: 'space-between', between: 'space-between',
+  'space-around': 'space-around', spacearound: 'space-around', around: 'space-around',
+  'space-evenly': 'space-around', spaceevenly: 'space-around', evenly: 'space-around',
+};
+const AGENT_ALIGN = {
+  'flex-start': 'start', flexstart: 'start', start: 'start', top: 'start', left: 'start',
+  'flex-end': 'end', flexend: 'end', end: 'end', bottom: 'end', right: 'end',
+  center: 'center', centre: 'center', middle: 'center',
+  stretch: 'stretch', fill: 'stretch', normal: 'stretch',
+};
+// Map a model-authored props bag onto the editor's real prop names and accepted values.
+function normalizeAgentProps(props) {
+  const out = {};
+  if (!props || typeof props !== 'object') return out;
+  for (const k in props) {
+    const lower = String(k).toLowerCase();
+    // Don't alias a key that's already exactly right (e.g. a real `textColor` must not hit `color`).
+    const key = Object.prototype.hasOwnProperty.call(AGENT_PROP_ALIAS, lower) && !/^(textColor|fillColor|radius|borderColor|borderWidth|fontWeight|fontSize|fontFamily|label|placeholder)$/.test(k)
+      ? AGENT_PROP_ALIAS[lower] : k;
+    let v = props[k];
+    if (key === 'fontWeight') { const m = AGENT_FONT_WEIGHT[String(v).toLowerCase().trim()]; if (m) v = m; }
+    if (key === 'fontFamily') { const m = AGENT_FONT_FAMILY[String(v).toLowerCase().trim()]; if (m) v = m; }
+    if (key === 'justify') { const m = AGENT_JUSTIFY[String(v).toLowerCase().trim()]; if (m) v = m; }
+    if (key === 'align') { const m = AGENT_ALIGN[String(v).toLowerCase().trim()]; if (m) v = m; }
+    out[key] = v;
+  }
+  // `tone` is a real semantic prop (badge/alert: info|success|…), but models routinely stuff the brand
+  // ACCENT hex into it on buttons — where the accent must be fillColor to render. A hex tone with no
+  // explicit fill is that mistake; reroute it so the researched accent actually shows.
+  if (typeof out.tone === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(out.tone) && out.fillColor == null) {
+    out.fillColor = out.tone; delete out.tone;
+  }
+  // Border CSS shorthand ("1px solid #262B36" / "1px #E0E0E0") → the three props the editor renders
+  // from; a raw `border` string draws nothing, so every shorthand border was being lost.
+  if (typeof out.border === 'string' && out.borderColor == null) {
+    const b = out.border;
+    const col = (b.match(/#[0-9a-fA-F]{3,8}|rgba?\([^)]*\)|var\(--[^)]*\)/) || [])[0];
+    const wid = (b.match(/(\d+(?:\.\d+)?)\s*px/) || [])[1];
+    const sty = (b.match(/\b(solid|dashed|dotted)\b/) || [])[1];
+    if (col) out.borderColor = col;
+    out.borderWidth = wid ? Number(wid) : 1;
+    out.borderStyle = sty || 'solid';
+    delete out.border;
+  }
+  return out;
+}
+
+// Post-build coherence pass: models style the SAME component kind inconsistently (one card radius 8,
+// the next radius 0; a border on some inputs, none on others). Within a batch, unify each kind's
+// radius and border to the value the model used MOST for that kind — so a page reads as one system
+// rather than a pile of one-offs. Only fills in from what the model actually chose (never invents a
+// look), and only touches nodes from this batch.
+function harmonizeAgentStyle(nodes, newIdSet) {
+  const mode = (arr) => { const c = {}; let best = arr[0], bn = 0; arr.forEach(v => { const k = JSON.stringify(v); c[k] = (c[k] || 0) + 1; if (c[k] > bn) { bn = c[k]; best = v; } }); return best; };
+  const byKind = {};
+  nodes.forEach(n => { if (newIdSet.has(n.id)) (byKind[n.kind] = byKind[n.kind] || []).push(n); });
+  ['button', 'card', 'input', 'select', 'textarea', 'badge', 'stat', 'image', 'frame'].forEach(kind => {
+    const g = byKind[kind];
+    if (!g || g.length < 2) return;
+    const rads = g.map(n => n.radius).filter(r => r != null);
+    if (rads.length) { const r = mode(rads); g.forEach(n => { n.radius = r; }); }
+    const cols = g.map(n => n.borderColor).filter(Boolean);
+    if (cols.length >= Math.ceil(g.length / 2)) { // only if a border is the norm for this kind
+      const bc = mode(cols), bw = mode(g.map(n => n.borderWidth).filter(Boolean)) || 1;
+      g.forEach(n => { if (!n.borderColor) { n.borderColor = bc; n.borderWidth = n.borderWidth || bw; n.borderStyle = n.borderStyle || 'solid'; } });
+    }
+  });
+}
+
+// Serialize the current design for the AI agent. Pure, so it can be measured/tested directly.
+//
+// `scope` comes from the chosen effort level and is the main token lever:
+//   low    — only the selection's neighbourhood (selected nodes + ancestor chain + direct children)
+//   medium — the current page, capped, selection first
+//   high   — as medium, plus project variables / workflows / custom components
+// Everything is kept lean: only set props are emitted, numbers rounded, long text clipped, and
+// `parent`/empty collections omitted rather than sent as null/[].
+function buildAgentContext(pages, activeId, selection, scope, extras) {
+  const ex = extras || {};
+  const pg = pages.find(p => p.id === activeId) || pages[0];
+  const childOf = {};
+  (pg.connections || []).filter(c => c.kind === 'child').forEach(c => { childOf[c.to] = c.from; });
+  const clip = (v) => (typeof v === 'string' && v.length > 160) ? v.slice(0, 160) + '…' : v;
+  const sel = new Set(selection || []);
+  const all = pg.nodes || [];
+  let ordered = all.filter(n => sel.has(n.id)).concat(all.filter(n => !sel.has(n.id)));
+  let cap = AGENT_MAX_NODES;
+  if (scope === 'low') {
+    // Just the selection's neighbourhood. With nothing selected there's no neighbourhood to send, so
+    // fall back to a small slice of the page.
+    if (sel.size) {
+      const keep = new Set(sel);
+      sel.forEach(id => { let p = childOf[id]; while (p && !keep.has(p)) { keep.add(p); p = childOf[p]; } });
+      (pg.connections || []).filter(c => c.kind === 'child' && sel.has(c.from)).forEach(c => keep.add(c.to));
+      ordered = all.filter(n => keep.has(n.id));
+    }
+    cap = 12;
+  }
+  const kept = ordered.slice(0, cap);
+  const keptIds = new Set(kept.map(n => n.id));
+  const ctx = {
+    // The live artboard the user is designing on — the model sizes a page's root frame to this width
+    // instead of guessing. Ships on EVERY effort (it's tiny and always relevant to placement).
+    // width/height alone left the model guessing where the artboard actually *is*: it reads x/y on every
+    // node but was never told which coordinates are on-canvas, so designs drifted past the right edge or
+    // stopped short of the bottom. The origin is fixed at 0,0, so spell the four edges out.
+    canvas: ex.artboard ? {
+      device: ex.device || 'desktop',
+      width: Math.round(ex.artboard.w), height: Math.round(ex.artboard.h),
+      left: 0, top: 0, right: Math.round(ex.artboard.w), bottom: Math.round(ex.artboard.h),
+      note: 'Artboard spans x 0..' + Math.round(ex.artboard.w) + ', y 0..' + Math.round(ex.artboard.h) +
+        '. Top-left is 0,0. Anything outside this rect is off-canvas and invisible to the user.',
+    } : undefined,
+    // The snap grid the USER's own drags land on. Sizes, padding and gaps that are multiples of it look
+    // deliberate; ones that aren't look like a near-miss the moment anything is nudged.
+    grid: (ex.grid && ex.grid.snap) ? {
+      size: ex.grid.size || 8,
+      note: 'Snap grid is ' + (ex.grid.size || 8) + 'px. Use multiples of it for padding, gap, and any ' +
+        'explicit width/height. The editor snaps every hand-drag to this grid, so off-grid values visibly jump when touched.',
+    } : undefined,
+    activePage: { id: pg.id, name: pg.name, route: pg.route },
+    pages: pages.map(p => ({ id: p.id, name: p.name, route: p.route, nodeCount: (p.nodes || []).length })),
+    nodes: kept.map(n => {
+      const o = { id: n.id, kind: n.kind || (window.kindOf ? window.kindOf(n) : 'frame'), x: Math.round(n.x), y: Math.round(n.y), w: Math.round(n.w), h: Math.round(n.h) };
+      if (n.label) o.label = clip(n.label);
+      if (childOf[n.id]) o.parent = childOf[n.id];
+      AGENT_DATA_KEYS.forEach(k => { if (n[k] !== undefined && n[k] !== '' && n[k] !== null) o[k] = clip(n[k]); });
+      return o;
+    }),
+    // Relationship graph for this page: kind 'child' = nesting, 'binds' = data/action link.
+    // Only edges between nodes the agent can actually see.
+    connections: (pg.connections || []).filter(c => keptIds.has(c.from) && keptIds.has(c.to))
+      .map(c => ({ from: c.from, to: c.to, kind: c.kind })),
+  };
+  // The page's scene animation. Ships on EVERY effort and is deliberately compact: without it the agent
+  // is blind to animation it already made, so "make it slower" would append a second track fighting the
+  // first. Only tracks on nodes it can actually see — a track naming an id absent from `nodes` is
+  // unactionable noise.
+  if (pg.timeline && (pg.timeline.tracks || []).length) {
+    const tl = pg.timeline;
+    const tracks = tl.tracks.filter(tr => keptIds.has(tr.nodeId)).map(tr => ({
+      nodeId: tr.nodeId, prop: tr.prop,
+      keys: (tr.keys || []).map(k => ({ t: k.t, value: clip(k.value), ease: k.ease })),
+    }));
+    if (tracks.length) {
+      ctx.timeline = {
+        on: tl.on !== false, loop: tl.loop !== false, autoplay: tl.autoplay !== false,
+        duration: tl.duration || 2000, tracks: tracks,
+      };
+    }
+  }
+  if (sel.size) ctx.selection = Array.from(sel);
+  if (all.length > kept.length) ctx.note = 'showing ' + kept.length + ' of ' + all.length + ' nodes';
+  // Project data + automation only ride along on High — they're rarely needed to place a button and
+  // they're pure token cost on every other request.
+  if (scope === 'high') {
+    const vars = (ex.variables || []).map(v => ({ id: v.id, name: v.name, type: v.type, scope: 'global' }))
+      .concat((ex.pageVars || []).map(v => ({ id: v.id, name: v.name, type: v.type, scope: 'page' })));
+    if (vars.length) ctx.variables = vars;
+    const wfs = (ex.workflows || []).map(w => ({ id: w.id, name: w.name }));
+    if (wfs.length) ctx.workflows = wfs;
+    const ccs = (ex.customComponents || []).map(c => ({ id: c.id, name: c.name, base: c.base }));
+    if (ccs.length) ctx.customComponents = ccs;
+  }
+  return ctx;
+}
+
+function boxesOverlap(a, b, m) {
+  m = m || 0;
+  return a.x < b.x + b.w + m && a.x + a.w + m > b.x && a.y < b.y + b.h + m && a.y + a.h + m > b.y;
+}
+// Nominal design width the agent lays out against (matches the "1440x1024 canvas" its System Message
+// states). Used to decide whether displaced content still fits beside something or has to go below.
+const AGENT_ARTBOARD_W = 1440;
+const AGENT_ARTBOARD_H = 1024;
+
+// Layout pass run after an agent batch. Models are unreliable at 2D placement — they overlap boxes,
+// undersize containers and spill children past their parent's edge — so the executor owns layout:
+//   1. containers grow to contain their children (deepest first)
+//   2. newly added top-level nodes are flowed into free space instead of landing on existing work
+// Only nodes from THIS batch move; whatever the user already had stays exactly where they put it.
+function relayoutAgentBatch(pg, newIdSet, fillSet, artW, fillHSet, artH, gridIn) {
+  fillSet = fillSet || new Set();
+  fillHSet = fillHSet || new Set();
+  artW = Math.round(artW || AGENT_ARTBOARD_W);   // real artboard width for this device (fallback: desktop)
+  artH = Math.round(artH || AGENT_ARTBOARD_H);
+  const grid = gridIn || agentGrid(null);        // no grid passed (older callers/tests) => plain rounding
+  const childrenOf = {}, parentOf = {}, byId = {};
+  pg.nodes.forEach(n => { byId[n.id] = n; });
+  (pg.connections || []).filter(c => c.kind === 'child').forEach(c => {
+    if (!childrenOf[c.from]) childrenOf[c.from] = [];
+    childrenOf[c.from].push(c.to);
+    parentOf[c.to] = c.from;
+  });
+
+  // Moving a node moves its whole subtree — children carry absolute coords, not offsets.
+  const moveTree = (id, dx, dy) => {
+    const n = byId[id];
+    if (!n) return;
+    n.x = Math.round(n.x + dx);
+    n.y = Math.round(n.y + dy);
+    (childrenOf[id] || []).forEach(k => moveTree(k, dx, dy));
+  };
+
+  // 1) Lay each container's children out along its layout axis, then grow it to contain them.
+  //    Recursive, and the order matters: sizes settle bottom-up (a child container must know its
+  //    final height before the sibling below it can be stacked), positions settle top-down.
+  //    Only containers THIS batch created get re-flowed — re-flowing one the user hand-arranged would
+  //    throw their work away. An existing container that merely gained a child still grows to fit.
+  // Widths resolve TOP-DOWN (a child can only fill a parent whose own width is already final), then
+  // we recurse, then heights and positions settle BOTTOM-UP. Getting this order wrong is why a
+  // `w:"fill"` image inside a card filled the card's 260px DEFAULT and stayed 228px after the grid
+  // resized that card to 353.
+  const seen = new Set();
+  // Forget a whole subtree so it can be laid out again — used when a child's height changes AFTER its
+  // descendants were already sized against the old one.
+  const clearSeen = (id) => { seen.delete(id); (childrenOf[id] || []).forEach(clearSeen); };
+  // `defH` = this node's height is DEFINITE (pinned by the artboard or by a parent that stretched it),
+  // as opposed to hugging its content. It has to travel top-down because a row can only give its
+  // children a height if it has a real one itself — sizing them against a hugging row's 160px kind
+  // default would be circular and wrong.
+  const flow = (id, defH) => {
+    if (seen.has(id)) return;
+    seen.add(id);
+    const n = byId[id];
+    if (!n) return;
+    // Free/anchored children are out of the flow entirely (CSS position:absolute): they are not sized
+    // by the axis split, not stacked, and — like an absolutely-positioned element — do not grow their
+    // parent. Everything below therefore works on `kids` (the flowed ones) and treats `freeKids`
+    // separately, once the parent's own box has settled.
+    const allKids = (childrenOf[id] || []).map(k => byId[k]).filter(Boolean);
+    const kids = allKids.filter(k => !agentIsFree(k));
+    const freeKids = allKids.filter(k => agentIsFree(k));
+    // A top-level node must fit the 1440 artboard. Models size a page frame at 1440 but then place a
+    // child wider than it, and the grow-to-contain step below used to expand the frame to ~1864 —
+    // running the whole page off-canvas. Clamp here (before children size) so they size to the real
+    // width, not a runaway one.
+    if (newIdSet.has(id) && !parentOf[id]) {
+      if (n.x < 0) n.x = 0;
+      if (n.y < 0) n.y = 0;
+      if (n.w > artW) n.w = artW;
+      if (n.x + n.w > artW) n.x = Math.max(0, artW - n.w);
+      // A screen root (h:"fill") spans the artboard exactly: pin it to 0,0 at full height BEFORE its
+      // children size, so row panes stretch against the real height instead of a kind default. This is
+      // what stops a login screen rendering as a short block with a dead band under it.
+      if (fillHSet.has(id)) { n.y = 0; n.h = artH; }
+    }
+    // Padding and gap on the grid, for THIS batch's containers only — they are the two numbers every
+    // child position is derived from, so putting them on the grid is what puts the children on it
+    // (a 12px kind-default gap otherwise throws every row off an 8px grid). A container the user made
+    // keeps whatever spacing they chose.
+    let pad = n.padding != null ? n.padding : 16;
+    let gap = n.gap != null ? n.gap : 8;
+    if (newIdSet.has(id) && grid.on && kids.length) {
+      // Containers only. Every node carries a default `gap`, so snapping unconditionally would rewrite
+      // it on headings and buttons too — inert (a leaf has nothing to space) but visible in the
+      // Inspector as a value nobody chose.
+      pad = grid.to(pad); gap = grid.to(gap);
+      if (n.padding != null) n.padding = pad;
+      if (n.gap != null) n.gap = gap;
+    }
+    const inner = Math.max(24, n.w - pad * 2);
+    const innerH = Math.max(24, n.h - pad * 2);
+    const cols = Math.max(1, Math.round(n.columns) || 2);
+    const cw = Math.max(24, Math.floor((inner - gap * (cols - 1)) / cols));
+
+    // Kids this node hands a definite height to — they pass `true` into their own flow().
+    const defKid = new Set();
+
+    // 1) TOP-DOWN widths — before recursing, so descendants size against the real number. A child may
+    //    NEVER be wider than the parent's inner box (that's what forced the frame to grow off-canvas).
+    if (kids.length && newIdSet.has(id)) {
+      if (n.layout === 'Grid') {
+        kids.forEach(k => { k.w = cw; });
+      } else if (n.layout === 'Flex row') {
+        // Row items sit side by side; split the inner width for fill/stretch/oversized ones, leave
+        // small explicit items (a logo, an icon) as they are.
+        const per = Math.max(24, Math.floor((inner - gap * (kids.length - 1)) / kids.length));
+        kids.forEach(k => { if (fillSet.has(k.id) || AGENT_STRETCH_KINDS[k.kind] || k.w > per) k.w = per; });
+        // CSS `align-items: stretch` — THE DEFAULT ON A FLEX ROW. Every container child of a row with a
+        // real height is full height, whether or not it asked. This mirrors the column branch below,
+        // which has always stretched container children to the parent's inner WIDTH for free; the row
+        // only ever honoured an explicit h:"fill", so a desktop body holding three columns sized them
+        // horizontally and then let them hug vertically — leaving the page background showing under all
+        // three ("the width is ok but the height is not"). Only when OUR height is definite: stretching
+        // against a hugging row's kind default would be circular.
+        // `align` is the CROSS axis, which on a row is the vertical one — so align:center/start/end opts
+        // out, exactly as in CSS (and exactly as `align` opts out of width-stretch on a column).
+        const vstretch = !n.align || n.align === 'stretch';
+        kids.forEach(k => {
+          if (!defH) return;
+          if (fillHSet.has(k.id) || (vstretch && AGENT_STRETCH_KINDS[k.kind])) { k.h = innerH; defKid.add(k.id); }
+        });
+      } else {
+        // Flex column (default): fill/stretch children span the inner width; any other child that
+        // overshoots is clamped to fit. An `align` other than stretch opts out, exactly as CSS does —
+        // align-items:center never stretches. Without this a 420px login card centred on a screen root
+        // got stretched to the full artboard and the "centring" was invisible. An explicit w:"fill"
+        // still wins either way: that child asked to span.
+        const stretch = !n.align || n.align === 'stretch';
+        kids.forEach(k => {
+          if (fillSet.has(k.id) || (stretch && AGENT_STRETCH_KINDS[k.kind])) k.w = inner;
+          else if (k.w > inner) k.w = inner;
+        });
+      }
+    }
+
+    // A free child still sizes against its parent (a w:"fill" dialog spans it) — it just isn't placed
+    // by the flow. Do it before recursing, same order as the flowed kids.
+    if (freeKids.length && newIdSet.has(id)) {
+      freeKids.forEach(k => {
+        if (fillSet.has(k.id)) k.w = inner;
+        else if (k.w > inner) k.w = inner;
+        if (fillHSet.has(k.id) && defH) k.h = innerH;
+      });
+    }
+
+    // 2) recurse — children now know their final width, and a row's children their final height
+    kids.forEach(k => flow(k.id, defKid.has(k.id)));
+    freeKids.forEach(k => flow(k.id, fillHSet.has(k.id) && defH));
+    // A leaf (heading, button, image) never reaches the hug below, so its own height is snapped here.
+    // Snapping up keeps a 52px heading from clipping while putting the next sibling back on the grid —
+    // and it is heights, not widths, that set the page's vertical rhythm.
+    if (!allKids.length) {
+      if (newIdSet.has(id) && grid.on) n.h = grid.up(n.h);
+      return;
+    }
+    // Anchor the free kids once our own box is final. A node holding ONLY free children has no flow to
+    // run, so this is also the point where it finishes.
+    const anchorFree = () => {
+      if (!newIdSet.has(id)) return;
+      freeKids.forEach(k => {
+        const p = placeFreeChild(n, k, pad);
+        moveTree(k.id, p.x - k.x, p.y - k.y);
+      });
+    };
+    if (!kids.length) { anchorFree(); return; }
+
+    // 2.5) Column fill: a child that asked for h:"fill" takes the parent's leftover vertical space once
+    //      its fixed-height siblings have settled — the flex-grow case (a body between a fixed nav and a
+    //      fixed footer).
+    //      It gets its EXACT share, up or down. This used to only ever grow, which looked safe and was
+    //      wrong: `h:"fill"` is resolved once at addNode time against the parent's height AT THAT MOMENT,
+    //      so a body inside a 1024 root is born 1024 — already bigger than the 936 of real slack. The
+    //      grow-only guard then skipped it, the body stayed a full artboard tall, and the root hugged
+    //      out to 1112 — taller than the artboard it was pinned to. Shrinking cannot clip content: the
+    //      hug below still does `max(h, contentH)` for a fill node, so real content always wins.
+    if (kids.length && newIdSet.has(id) && defH && n.layout !== 'Grid' && n.layout !== 'Flex row') {
+      const growKids = kids.filter(k => fillHSet.has(k.id));
+      if (growKids.length) {
+        const fixed = kids.reduce((s, k) => s + (fillHSet.has(k.id) ? 0 : k.h), 0);
+        const slack = innerH - fixed - gap * (kids.length - 1);
+        const per = Math.max(24, Math.floor(slack / growKids.length));
+        growKids.forEach(k => {
+          if (per === k.h) return;
+          k.h = per;
+          // The child just went from hugging to definite, but its own subtree was already flowed
+          // against the old height — so a row inside it never stretched ITS children. Re-flow that
+          // subtree now that the real height is known. Bounded: only children that actually grew, and
+          // `seen` still guards against cycles once the re-flow completes.
+          clearSeen(k.id);
+          flow(k.id, true);
+        });
+      }
+    }
+
+    // 3) BOTTOM-UP positions + grow to contain
+    const place = (k, nx, ny) => moveTree(k.id, nx - k.x, ny - k.y);
+    if (newIdSet.has(id)) {
+      const x0 = n.x + pad, y0 = n.y + pad;
+      if (n.layout === 'Grid') {
+        // Real grid flow: `columns` cells sharing the inner width, wrapping into rows. Without this a
+        // {"layout":"Grid","columns":3} row of cards just stacked vertically at full width.
+        let cy = y0, rowH = 0;
+        kids.forEach((k, i) => {
+          const c = i % cols;
+          if (c === 0 && i > 0) { cy += rowH + gap; rowH = 0; }
+          place(k, x0 + c * (cw + gap), cy);
+          rowH = Math.max(rowH, k.h);
+        });
+      } else if (n.layout === 'Flex row') {
+        let cx = x0;
+        kids.forEach(k => { place(k, cx, y0); cx += k.w + gap; });
+      } else {
+        // Flex column (default): stack using each child's SETTLED height, so a sibling that grew
+        // can't be overlapped by the one after it (a chart used to land inside the grid above it).
+        let cy = y0;
+        kids.forEach(k => { place(k, x0, cy); cy += k.h + gap; });
+      }
+
+      // Distribute leftover space along the main axis. Nodes render at absolute coords, so `justify`
+      // is inert metadata unless it is baked into them here. Without it, content shorter than its
+      // container always piles at the top — which is the dead band under a full-height screen root,
+      // and why a centred login card sits jammed against the artboard's top edge.
+      const j = n.justify;
+      const axis = n.layout === 'Flex row' ? 'x' : (n.layout === 'Grid' ? '' : 'y');
+      if (j && j !== 'start' && axis) {
+        const vert = axis === 'y';
+        const lo = Math.min.apply(null, kids.map(k => (vert ? k.y : k.x)));
+        const hi = Math.max.apply(null, kids.map(k => (vert ? k.y + k.h : k.x + k.w)));
+        const slack = (vert ? innerH : inner) - (hi - lo);
+        const shift = (k, d) => moveTree(k.id, vert ? 0 : d, vert ? d : 0);
+        if (slack > 0) {
+          if (j === 'center') kids.forEach(k => shift(k, Math.round(slack / 2)));
+          else if (j === 'end') kids.forEach(k => shift(k, slack));
+          else if ((j === 'space-between' || j === 'space-around') && kids.length > 1) {
+            const step = j === 'space-between' ? slack / (kids.length - 1) : slack / kids.length;
+            const lead = j === 'space-around' ? step / 2 : 0;
+            kids.forEach((k, i) => shift(k, Math.round(lead + step * i)));
+          }
+        }
+      }
+
+      // Cross-axis alignment (CSS align-items), baked in for the same reason as `justify` above. Only
+      // children narrower/shorter than the inner box can move — a fill/stretch child already spans it,
+      // so `stretch` is a no-op here. This is what centres a fixed-width card inside a full-height pane.
+      const al = n.align;
+      if (al && al !== 'start' && al !== 'stretch' && axis) {
+        const col = axis === 'y';   // column stacks on y, so its cross axis is x (and vice versa)
+        kids.forEach(k => {
+          const room = col ? inner - k.w : innerH - k.h;
+          if (room <= 0) return;
+          const d = al === 'center' ? Math.round(room / 2) : room;
+          moveTree(k.id, col ? d : 0, col ? 0 : d);
+        });
+      }
+    }
+    const right = Math.max.apply(null, kids.map(k => k.x + k.w));
+    const bottom = Math.max.apply(null, kids.map(k => k.y + k.h));
+    n.w = Math.max(n.w, Math.round(right - n.x + pad));
+    // Height HUGS the content for this batch's containers — auto-layout hugs, it does not keep a
+    // guessed height. Math.max alone (grow-only) left every model-sized frame at whatever h it
+    // invented, with a dead band under the content; six such frames stacked in a column then
+    // overflowed the artboard bottom. A node the USER sized is still grow-only — shrinking a frame
+    // they hand-sized would throw their work away. An h:"fill" node keeps its fill height.
+    // Snap UP, never down: a hugged height rounded down would clip the content it just measured.
+    const contentH = grid.up(bottom - n.y + pad);
+    // Hug ONLY if nothing already decided this node's height. `defH` means a parent stretched us (a
+    // row child), the artboard pinned us (a screen root), or we took a column's slack — in every one of
+    // those the height is a decision, and hugging would immediately undo it. That is precisely what
+    // silently defeated the row stretch: children were sized to the row's inner height in step 1 and
+    // then collapsed back to their content here, three lines later. A definite node still GROWS to
+    // contain overflowing content — being told a height is not a licence to clip.
+    if (newIdSet.has(id) && !fillHSet.has(id) && !defH) n.h = contentH;
+    else n.h = Math.max(n.h, contentH);
+    // A screen root means EXACTLY the artboard. The hug above can push it past that when a child
+    // overflows, and a root taller than the artboard is a contradiction — h:"fill" asked for the
+    // artboard, not for whatever its contents happened to need. Re-pin it. Overflowing children keep
+    // their own coordinates, so the overflow stays visible (and CanvasImage still draws them outside
+    // the artboard box for the audit to catch) rather than being papered over by a taller root.
+    if (newIdSet.has(id) && !parentOf[id] && fillHSet.has(id)) n.h = artH;
+    // Last: our box is final, so a free child can be anchored against its real edges. Doing this any
+    // earlier would centre a dialog against a height that was still about to change.
+    anchorFree();
+    // Belt: a top-level node never grows past the artboard, even if a child slipped through.
+    if (!parentOf[id]) n.w = Math.min(n.w, artW - Math.max(0, n.x));
+  };
+  // A root's height is definite only when it's a screen root pinned to the artboard (h:"fill"); a page
+  // section hugs its content, so nothing inside it can stretch to a height that isn't decided yet.
+  pg.nodes.filter(n => !parentOf[n.id]).forEach(r => flow(r.id, newIdSet.has(r.id) && fillHSet.has(r.id)));
+
+  // 1.5) Stack the batch's full-bleed sections FLUSH, in order, from the top of the artboard.
+  //      A landing page is a continuous column of sections — nav against hero against features. Two
+  //      things conspire against that: nodes created without coords go through findOpenSpot, which is
+  //      the editor's MANUAL placement helper (it starts at 80,80 and tiles with 24px margins), and any
+  //      y assigned at creation is stale anyway because heights only settle in flow() above, where
+  //      containers hug their content. Both leave the artboard showing through as dark bands — above
+  //      the nav and between every section. Re-stacking here, after heights settle, is the only place
+  //      that can be right.
+  //      Full-bleed only: a narrow floating node is not a page section and keeps its placement. If the
+  //      user already has work on the page we stack BELOW it rather than on top of it.
+  {
+    const allRoots = pg.nodes.filter(n => !parentOf[n.id]);
+    const isSection = (n) => n.w >= artW - 2;
+    const sections = allRoots.filter(n => newIdSet.has(n.id) && isSection(n)).sort((a, b) => (a.y - b.y) || (a.x - b.x));
+    if (sections.length) {
+      const existing = allRoots.filter(n => !newIdSet.has(n.id));
+      // Start on the grid: stacking flush from an off-grid baseline would put every section below it
+      // off-grid too, however carefully their own heights were snapped.
+      let cy = existing.length ? grid.to(Math.max.apply(null, existing.map(o => o.y + o.h))) : 0;
+      sections.forEach(s => { moveTree(s.id, 0 - s.x, cy - s.y); cy += s.h; });
+    }
+  }
+
+  // 2) Flow the batch's new top-level nodes into free space. Prefer sliding RIGHT when it still fits
+  //    on the artboard — that's what you want beside a tall sidebar — and only fall back to pushing
+  //    DOWN (the natural answer when two full-width sections collide).
+  const roots = pg.nodes.filter(n => !parentOf[n.id]);
+  const boxOf = (n) => ({ x: n.x, y: n.y, w: n.w, h: n.h });
+  const obstacles = roots.filter(n => !newIdSet.has(n.id)).map(boxOf);
+  roots.filter(n => newIdSet.has(n.id)).sort((a, b) => (a.y - b.y) || (a.x - b.x)).forEach(n => {
+    let guard = 0;
+    while (guard++ < 60) {
+      // Margin 0 on purpose: only REAL overlap counts. A margin here treats a legitimately adjacent
+      // layout (content flush against a 240px sidebar, 240+1199=1439 inside a 1440 artboard) as a
+      // collision, and the relocation then dumps it off the bottom of the canvas.
+      const hit = obstacles.filter(o => boxesOverlap(boxOf(n), o, 0));
+      if (!hit.length) break;
+      const right = Math.max.apply(null, hit.map(o => o.x + o.w));
+      const bottom = Math.max.apply(null, hit.map(o => o.y + o.h));
+      if (right + 24 + n.w <= artW) moveTree(n.id, right + 24 - n.x, 0);
+      else moveTree(n.id, 0, bottom + 24 - n.y);
+    }
+    obstacles.push(boxOf(n));
+  });
 }
 
 // Descendant set of `rootId` following child edges — used to prevent parenting cycles.
@@ -391,6 +1508,7 @@ function LatticeApp() {
   });
   React.useEffect(() => { try { localStorage.setItem('lattice_collapsed', JSON.stringify(collapsed)); } catch {} }, [collapsed]);
   const [shareOpen, setShareOpen] = React.useState(false);
+  const [aiOpen, setAiOpen] = React.useState(false);   // AI Helper assistant panel (Plan Pro)
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   const [previewDialog, setPreviewDialog] = React.useState(null);
   const [allowEditing, setAllowEditing] = React.useState(true);
@@ -497,12 +1615,14 @@ function LatticeApp() {
   const canvasViewRef = React.useRef(null);   // persists Canvas pan/zoom across preview toggles
   const canvasApiRef = React.useRef(null);    // Canvas publishes { fit, reset, zoomTo, zoomToSelection } here
   const artboardRef = React.useRef(null);     // current device artboard box, for single-node align
+  const settingsRef = React.useRef(null);     // { snap, gridSize, … } — the agent lays out on the same grid
   const editingStateRef = React.useRef('default');
   const openAnimTabsRef = React.useRef([]);
   const activeAnimRef = React.useRef(null);
   const animFrameIdxRef = React.useRef(0);
   const workflowsRef = React.useRef(workflows);
   const variablesRef = React.useRef(variables);
+  const customComponentsRef = React.useRef(customComponents);
   const runtimeVarsRef = React.useRef(runtimeVars);
   const pagesRef = React.useRef(pages);
   const viewRef = React.useRef(view);
@@ -520,8 +1640,12 @@ function LatticeApp() {
   React.useEffect(() => { activeDeviceRef.current = activeDevice; }, [activeDevice]);
   React.useEffect(() => { geomDeviceRef.current = geomDevice; }, [geomDevice]);
   React.useEffect(() => { artboardRef.current = artboard; }, [artboard]);
+  // The snap grid, for the agent. Every drag the USER makes is snapped to it (Canvas.jsx), so agent
+  // output that ignores it is off-grid the moment it lands — nudge one node and it visibly jumps.
+  React.useEffect(() => { settingsRef.current = settings; }, [settings]);
   React.useEffect(() => { workflowsRef.current = workflows; }, [workflows]);
   React.useEffect(() => { variablesRef.current = variables; }, [variables]);
+  React.useEffect(() => { customComponentsRef.current = customComponents; }, [customComponents]);
   React.useEffect(() => { runtimeVarsRef.current = runtimeVars; }, [runtimeVars]);
   React.useEffect(() => { pagesRef.current = pages; }, [pages]);
   React.useEffect(() => { viewRef.current = view; }, [view]);
@@ -1085,7 +2209,8 @@ function LatticeApp() {
   }, [setNodes, pushHistory]);
 
   // --- Page scene timeline: a whole-screen animation whose tracks each target one node's property. --
-  const SCENE_DEFAULT = { on: true, loop: true, autoplay: true, duration: 2000, tracks: [] };
+  // SCENE_DEFAULT is module-scoped (above buildAgentPages) so the agent executor and this editor can
+  // never drift apart on what an un-configured timeline is.
   const mutTimeline = (fn) => setPages(ps => ps.map(p => p.id === activePageIdRef.current
     ? { ...p, timeline: fn({ ...SCENE_DEFAULT, ...(p.timeline || {}) }) } : p));
   const sceneAddTrack = (prop, nodeId, value) => mutTimeline(tl => (tl.tracks.some(tr => tr.nodeId === nodeId && tr.prop === prop) ? tl : { ...tl, tracks: [...tl.tracks, { nodeId, prop, keys: [{ t: 0, value, ease: 'ease-out' }] }] }));
@@ -1515,11 +2640,18 @@ function LatticeApp() {
     const gid = uid('menu');
     const firstId = items.slice().sort((a, b) => a.y - b.y)[0].id;
     const idSet = new Set(items.map(n => n.id));
+    // Resting labels read white on the dark menu. Only items that render their OWN label respect
+    // node.textColor — a container's label is a separate child node this command doesn't own (and
+    // whitening it would hide the label when its parent becomes the white active pill), so leave those
+    // for a manual colour. Never clobber a textColor the user already set.
+    const LABEL_KINDS = new Set(['button', 'text', 'link', 'heading']);
     pushHistory();
     setNodes(ns => ns.map(n => {
       if (!idSet.has(n.id)) return n;
+      const whiten = LABEL_KINDS.has(n.kind) && (n.textColor == null || n.textColor === '');
       return {
         ...n, navGroup: gid, navActive: n.id === firstId, clickMode: 'toggle',
+        ...(whiten ? { textColor: '#ffffff' } : null),
         states: {
           ...(n.states || {}),
           click:   { ...(n.states && n.states.click),   ...active(n), dur: 150, ease: 'ease-out' },
@@ -1712,6 +2844,53 @@ function LatticeApp() {
   const dropComponent = React.useCallback((c, cx, cy) => {
     placeNode(c, { x: Math.round(cx - 100), y: Math.round(cy - 60) });
   }, []); // eslint-disable-line
+
+  // --- AI agent bridge: lets the AI Helper read the current design and apply a batch of edits ------
+  const applyAgentActions = React.useCallback((actions, priorRefs) => {
+    const s = settingsRef.current || {};
+    const res = buildAgentPages(pagesRef.current, activePageIdRef.current, actions, priorRefs, {
+      variables: variablesRef.current, workflows: workflowsRef.current, customComponents: customComponentsRef.current,
+      artboard: artboardRef.current, grid: { snap: !!s.snap, size: s.gridSize || 8 },
+    });
+    if (!res.total) return { total: 0, summary: 'No changes', missing: res.missing, unknownOps: res.unknownOps, refs: res.refs, undoScope: res.undoScope };
+    pushHistory();
+    setPages(res.pages);
+    // Project-level state lives in its own React state (and outside the page-scoped undo, same as the
+    // editor's own add-workflow / delete-page). Write back only what the batch actually touched.
+    if (res.globalVarsChanged) setVariables(res.variables);
+    if (res.workflowsChanged) setWorkflows(res.workflows);
+    if (res.componentsChanged) setCustomComponents(res.customComponents);
+    if (res.active !== activePageIdRef.current) setActivePageId(res.active);
+    // Select the freshly created nodes that live on the (possibly new) active page, for visible feedback.
+    const activePage = res.pages.find(p => p.id === res.active);
+    const onActive = activePage ? res.newNodeIds.filter(id => activePage.nodes.some(n => n.id === id)) : [];
+    if (onActive.length) { setSelectedIds(onActive); setView('design'); setPreviewMode(false); }
+    return { total: res.total, summary: res.summary, missing: res.missing, unknownOps: res.unknownOps, refs: res.refs, undoScope: res.undoScope };
+  }, [pushHistory]); // eslint-disable-line
+  const agentApi = React.useMemo(() => ({
+    // `scope` comes from the chosen effort level (low/medium/high) — see buildAgentContext.
+    getContext: (scope) => {
+      const pg = pagesRef.current.find(p => p.id === activePageIdRef.current) || pagesRef.current[0];
+      return buildAgentContext(pagesRef.current, activePageIdRef.current, selectedIdsRef.current, scope, {
+        variables: variablesRef.current, pageVars: pg && pg.vars,
+        workflows: workflowsRef.current, customComponents: customComponents,
+        artboard: artboardRef.current, device: activeDeviceRef.current,
+        grid: { snap: !!(settingsRef.current && settingsRef.current.snap), size: (settingsRef.current && settingsRef.current.gridSize) || 8 },
+      });
+    },
+    // A PNG of the active page, so the audit stage can look at the design instead of only reading its
+    // coordinates. Drawn from node data (CanvasImage.jsx), so it needs no preview mounted and is a pure
+    // function of the same state getContext serializes — which is what keeps the audit cache honest.
+    getImage: () => {
+      if (!window.renderCanvasImage) return null;
+      const pg = pagesRef.current.find(p => p.id === activePageIdRef.current) || pagesRef.current[0];
+      if (!pg) return null;
+      try {
+        return window.renderCanvasImage(pg.nodes, pg.connections, artboardRef.current, {});
+      } catch (e) { console.warn('[ai] canvas image failed: ' + e.message); return null; }
+    },
+    apply: applyAgentActions,
+  }), [applyAgentActions, customComponents]); // eslint-disable-line
 
   // --- Custom components: capture a configured node's variant into a reusable Library item ---
   const [saveCompFor, setSaveCompFor] = React.useState(null);  // node id awaiting a name
@@ -2285,6 +3464,7 @@ function LatticeApp() {
         onShare={() => setShareOpen(true)} onGenerate={generate}
         dirty={!nodes.every(n => n.synced)}
         onUndo={undo} onRedo={redo} canUndo={canUndo} canRedo={canRedo}
+        aiOpen={aiOpen} onToggleAI={() => setAiOpen(v => !v)}
       />
 
       <div style={{ flex: 1, display: 'flex', minHeight: 0, position: 'relative' }}>
@@ -2440,6 +3620,8 @@ function LatticeApp() {
           </button>
         )}
       </div>
+
+      <AIHelper open={aiOpen} onClose={() => setAiOpen(false)} agent={agentApi} />
 
       <Dialog open={shareOpen} onClose={() => setShareOpen(false)} title="Share project"
         description="Anyone with the link can view this canvas."

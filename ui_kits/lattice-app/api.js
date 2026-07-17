@@ -42,10 +42,15 @@ window.api = (function () {
     removeMember: (id) => req('DELETE', '/api/team/' + id),
     // account
     updateAccount: (b) => req('PUT', '/api/account', b),
+    // AI usage (per-user token budget)
+    aiUsage: () => req('GET', '/api/ai/usage'),
+    aiTools: () => req('GET', '/api/ai/tools'),
     // admin
     adminStats: () => req('GET', '/api/admin/stats'),
     adminUsers: () => req('GET', '/api/admin/users'),
     adminSetPlan: (id, plan_id) => req('PUT', '/api/admin/users/' + id + '/plan', { plan_id }),
+    adminSetAiLimit: (id, ai_token_limit) => req('PUT', '/api/admin/users/' + id + '/ai-limit', { ai_token_limit }),
+    adminResetAiUsage: (id) => req('POST', '/api/admin/users/' + id + '/ai-reset', {}),
     adminDeleteUser: (id) => req('DELETE', '/api/admin/users/' + id),
   };
 })();

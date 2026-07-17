@@ -392,6 +392,9 @@ function Inspector({ node, onChange, onBaseChange, onRename, connections, onDele
           <Section title="Button">
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <Select label="Variant" size="sm" options={['solid', 'outline', 'ghost', 'danger']} value={node.variant || 'solid'} onChange={e => set('variant')(e.target.value)} />
+              {node.variant === 'ghost' && (
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5, marginTop: -4 }}>Transparent panel — shows just the icon + text.</div>
+              )}
               <Select label="Size" size="sm" options={['sm', 'md', 'lg']} value={node.btnSize || 'md'} onChange={e => set('btnSize')(e.target.value)} />
               <Switch label="Full width" checked={!!node.fullWidth} onChange={set('fullWidth')} />
               <Switch label="Disabled" checked={!!node.disabled} onChange={set('disabled')} />

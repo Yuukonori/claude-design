@@ -812,7 +812,16 @@ function PreviewCanvas({ nodes, connections, artboard, device, onAction, runtime
   // so a moving/animating mask drags the clip window with it.
   const maskById = {}; visible.forEach(n => { maskById[n.id] = n; });
   const maskNodeIds = new Set(visible.filter(n => n.maskId).map(n => n.maskId));
-  const W = artboard ? artboard.w : 1440, H = artboard ? artboard.h : 1024;
+  const W = artboard ? artboard.w : 1440;
+  // The artboard's height is the FOLD, not the page. A landing page is meant to run several screens
+  // deep, and the frame used to be pinned to exactly `artboard.h` with overflow:hidden — so everything
+  // below the fold was silently clipped away and simply did not exist in preview. The frame grows to
+  // whatever the design actually occupies; the canvas already pans and zooms, so a long page is
+  // reachable. WIDTH stays pinned to the artboard: nothing scrolls sideways, so horizontal overflow
+  // must still be visibly clipped rather than quietly widening the page.
+  const FOLD = artboard ? artboard.h : 1024;
+  const contentBottom = visible.reduce((m, n) => Math.max(m, (n.y || 0) + (n.h || 0)), 0);
+  const H = Math.max(FOLD, Math.ceil(contentBottom));
 
   // State overrides are applied by re-rendering the merged node (below); this only supplies the
   // transition so the change animates. Targets descendants too, since fill/scale/etc. live inside

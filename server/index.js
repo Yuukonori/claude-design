@@ -18,6 +18,7 @@ app.use('/api', require('./routes/billing')); // /api/plans, /api/subscription, 
 app.use('/api/team', require('./routes/team'));
 app.use('/api/account', require('./routes/account'));
 app.use('/api/admin', require('./routes/admin'));
+app.use('/api/ai', require('./routes/ai')); // /api/ai/tools, /api/ai/usage
 app.use('/api/proxy', require('./routes/proxy'));
 
 // Unknown API route -> JSON 404 (before static, so /api/* never serves files)

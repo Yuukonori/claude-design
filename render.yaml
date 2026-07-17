@@ -35,3 +35,6 @@ services:
         sync: false
       - key: GITHUB_CLIENT_SECRET
         sync: false
+      # AI Helper — set in the Render dashboard from aistudio.google.com (kept out of git).
+      - key: GEMINI_API_KEY
+        sync: false

@@ -104,6 +104,13 @@ function Account() {
   const { user, refresh } = useAuth();
   const [name, setName] = React.useState(user.name || '');
   const [busy, setBusy] = React.useState(false);
+  const [usage, setUsage] = React.useState(undefined); // undefined = loading, null = unavailable
+  const [aiTools, setAiTools] = React.useState([]);
+
+  React.useEffect(() => {
+    api.aiUsage().then(setUsage).catch(() => setUsage(null));
+    api.aiTools().then(r => setAiTools(r.tools || [])).catch(() => {});
+  }, []);
 
   const saveProfile = async () => {
     setBusy(true);
@@ -111,12 +118,54 @@ function Account() {
     catch (ex) { toast({ tone: 'warning', title: 'Failed', message: ex.message }); } finally { setBusy(false); }
   };
 
+  const fmtTok = (n) => { n = Math.max(0, Math.round(n || 0)); return n >= 1000 ? (n % 1000 === 0 || n / 1000 >= 100 ? Math.round(n / 1000) : Math.round(n / 100) / 10) + 'K' : String(n); };
+  const usePct = usage ? Math.min(100, usage.limit > 0 ? (usage.used / usage.limit) * 100 : 0) : 0;
+  const barColor = usage ? (usage.remaining / usage.limit <= 0.1 ? 'var(--status-danger-fg)' : usage.remaining / usage.limit <= 0.25 ? 'var(--amber-base)' : 'var(--action-solid)') : 'var(--action-solid)';
+
   return (
     <AppShell active="/account" user={user} title="Account">
       <div style={{ display: 'flex', flexDirection: 'column', gap: 20, maxWidth: 820, width: '100%', margin: '0 auto' }}>
         <Section title="Profile" desc="Your display name across Lattice.">
           <Field label="Display name" value={name} onChange={e => setName(e.target.value)} />
           <div><Button variant="solid" size="sm" disabled={busy} onClick={saveProfile}>Save profile</Button></div>
+        </Section>
+
+        <Section title="AI usage" desc="Your AI Helper token budget. Each tool spends a fixed number of tokens per use.">
+          {usage === undefined ? (
+            <div style={{ fontSize: 13, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>Loading…</div>
+          ) : usage === null ? (
+            <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>Usage is unavailable right now.</div>
+          ) : (
+            <>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
+                <StatCard icon="coins" label="Used" value={fmtTok(usage.used)} hint="tokens spent" />
+                <StatCard icon="battery-charging" label="Remaining" value={fmtTok(usage.remaining)} hint="tokens left" />
+                <StatCard icon="gauge" label="Limit" value={fmtTok(usage.limit)} hint="total allowance" />
+              </div>
+              <div>
+                <div style={{ height: 8, borderRadius: 4, background: 'var(--surface-inset)', overflow: 'hidden' }}>
+                  <div style={{ height: '100%', width: usePct + '%', background: barColor, transition: 'width .3s ease' }} />
+                </div>
+                <div style={{ fontSize: 11.5, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', marginTop: 6 }}>{fmtTok(usage.used)} / {fmtTok(usage.limit)} used · {Math.round(usePct)}%</div>
+              </div>
+              {usage.byTool && usage.byTool.length > 0 && (
+                <div>
+                  <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 8 }}>By tool</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {usage.byTool.map(b => {
+                      const t = aiTools.find(x => x.id === b.tool);
+                      return (
+                        <div key={b.tool} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 13 }}>
+                          <span style={{ color: 'var(--text-secondary)' }}>{t ? t.name : b.tool}<span style={{ color: 'var(--text-disabled)' }}> · {b.count}×</span></span>
+                          <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>{fmtTok(b.tokens)}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
         </Section>
         <Section title="Connected account" desc="You sign in with GitHub. These details come from your GitHub profile.">
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>

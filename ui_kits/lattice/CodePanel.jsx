@@ -80,7 +80,9 @@ function nodeBaseStyleObj(n, maskNode) {
     const v = n.variant || 'solid';
     const solidFill = n.gradient ? null : n.fillColor;
     const pal = ({
-      solid:   { background: bg || 'var(--action-solid)', color: solidFill ? '#000' : 'var(--action-solid-text)', border: '1px solid ' + (solidFill || (bg ? 'transparent' : 'var(--action-solid)')) },
+      // A solid button's border only ever existed to match its fill (seamless). Baking it transparent
+      // keeps the same resting look but avoids a stale 1px ring when a state shades only the fill.
+      solid:   { background: bg || 'var(--action-solid)', color: solidFill ? '#000' : 'var(--action-solid-text)', border: '1px solid transparent' },
       outline: { background: bg || 'transparent', color: 'var(--text-primary)', border: '1px solid var(--border-default)' },
       ghost:   { background: bg || 'transparent', color: 'var(--text-secondary)', border: '1px solid transparent' },
       danger:  { background: bg || 'transparent', color: 'var(--status-danger-fg)', border: '1px solid var(--status-danger-fg)' },
@@ -101,10 +103,45 @@ function nodeBaseStyleObj(n, maskNode) {
     style.display = 'flex'; style.alignItems = 'center';
     style.justifyContent = n.textAlign === 'center' ? 'center' : n.textAlign === 'right' ? 'flex-end' : 'flex-start';
     if (kind === 'heading' && !n.fontSize) style.fontSize = 28;
+  } else if (kind === 'frame' || kind === 'stack' || kind === 'grid' || kind === 'card' || kind === 'section') {
+    // Match Preview, which defaults an empty container to the card surface (PreviewCanvas `contBg`), so
+    // menu panels / cards look the same in Run/Web as they do in the editor.
+    if (!bg && !(n.shader && n.shader.on)) style.background = 'var(--surface-card)';
   }
   // Never let a geometry key leak into the base style — geometry is layer-dependent (see __g).
   delete style.position; delete style.left; delete style.top; delete style.width; delete style.height;
   return style;
+}
+
+// Paint props an interaction state can change. Baked per-state (below) so the runtime can apply a
+// state's WHOLE look — border/shadow/gradient/radius/transform — exactly like Preview, instead of
+// mutating a hand-picked subset (which left, e.g., a stale border ring on hover). Excludes
+// geometry/typography, which don't vary per interaction state.
+// `border` is the shorthand nodeBaseStyleObj emits — its longhands (borderColor/Width/Style) are
+// intentionally absent so setting the shorthand isn't clobbered by a later longhand reset.
+const PAINT_KEYS = ['background', 'color', 'border', 'borderRadius',
+  'boxShadow', 'filter', 'backdropFilter', 'WebkitBackdropFilter', 'mixBlendMode', 'opacity',
+  'transform', 'transformOrigin', 'overflow', 'clipPath', 'WebkitClipPath'];
+function pickPaint(style) {
+  const o = {}; if (!style) return o;
+  for (const k of PAINT_KEYS) if (style[k] != null && style[k] !== '') o[k] = style[k];
+  return o;
+}
+// Bake a node's resting paint (`st0`) plus a full paint style per usable STATIC state (`stMap`),
+// computed with the SAME resolvers Preview uses (nodeBaseStyleObj + mergeState). The runtime assigns
+// these wholesale (see LNode.applyStatic), so Run matches Preview for every static hover/press/click/
+// menu state. Trigger-bound animations are excluded — those are sampled per-frame by applyOverrides.
+const STATE_KEYS_GEN = ['hoverOn', 'hoverOff', 'press', 'hold', 'click', 'rightClick', 'drag', 'drop'];
+function nodeStateStyles(n, maskNode) {
+  const st0 = pickPaint(nodeBaseStyleObj(n, maskNode));
+  const stMap = {};
+  STATE_KEYS_GEN.forEach(key => {
+    if (!(window.stateHasOverrides && window.stateHasOverrides(n, key))) return;
+    if (window.stateAnimId && window.stateAnimId(n, key)) return;   // animation → sampled per-frame
+    const merged = window.mergeState ? window.mergeState(n, key) : n;
+    stMap[key] = pickPaint(nodeBaseStyleObj(merged, maskNode));
+  });
+  return { st0: st0, stMap: stMap };
 }
 
 // Per-device geometry table for a node: { <layer>: {x,y,w,h,hidden?} }. `desktop` is the node's base
@@ -206,7 +243,7 @@ function genPageTsx(page, comp) {
     if (!nodeHasBehavior(n)) return el;
     usesLNode = true;
     const nvar = 'NODE' + i;
-    geomDecls.push('const ' + nvar + ' = ' + nodeBehaviorLiteral(n, gvar) + ';');
+    geomDecls.push('const ' + nvar + ' = ' + nodeBehaviorLiteral(n, gvar, maskNode) + ';');
     return '      <LNode key=' + JSON.stringify(n.id || ('n' + i)) + ' layer={layer} node={' + nvar + '}>\n  '
       + el + '\n      </LNode>';
   }).filter(Boolean).join('\n');
@@ -228,9 +265,10 @@ function nodeHasBehavior(n) {
 // The baked data an LNode needs: id, interactions, animation states, the animatable base props, and a
 // reference to the node's geometry table (Gn) for resolving the box per device layer.
 const LNODE_BASE_PROPS = ['rotation', 'scale', 'skewX', 'skewY', 'flipH', 'flipV', 'opacity', 'fillColor', 'gradient', 'textColor', 'borderColor', 'borderWidth', 'radius', 'radii', 'transformOrigin'];
-function nodeBehaviorLiteral(n, gvar) {
+function nodeBehaviorLiteral(n, gvar, maskNode) {
   const base = {};
   LNODE_BASE_PROPS.forEach(k => { if (n[k] != null) base[k] = n[k]; });
+  const ss = nodeStateStyles(n, maskNode);
   const anim = (n.customStates || []).filter(s => (s.type || 'static') === 'anim').map(s => ({
     id: s.id, name: s.name, type: 'anim', tracks: s.tracks, frames: s.frames,
     loop: s.loop, loopWrap: s.loopWrap, duration: s.duration, autoplay: s.autoplay,
@@ -242,7 +280,10 @@ function nodeBehaviorLiteral(n, gvar) {
     + ', clickMode: ' + JSON.stringify(n.clickMode || 'toggle')
     + ', navGroup: ' + JSON.stringify(n.navGroup || null)
     + ', navActive: ' + JSON.stringify(!!n.navActive)
-    + ', base: ' + JSON.stringify(base) + ', geom: ' + gvar + ' }';
+    + ', base: ' + JSON.stringify(base)
+    + ', st0: ' + JSON.stringify(ss.st0)
+    + ', stMap: ' + JSON.stringify(ss.stMap)
+    + ', geom: ' + gvar + ' }';
 }
 
 function generatedFiles(pages, config) {
@@ -374,6 +415,38 @@ function stateDuration(state: any) {
   if (!state) return 0;
   if (state.duration) return state.duration;
   return tracksDuration(ensureTracks(state).tracks);
+}
+
+// --- appearance resolvers (ported from NodeStyle) so animation tracks that change gradient / effects /
+// per-corner radii / blend render in Run exactly like Preview (which recomputes them every frame). ---
+function rtGradientCss(g: any) {
+  if (!g || !Array.isArray(g.stops) || g.stops.length === 0) return '';
+  const stops = g.stops.slice().sort((a: any, b: any) => (a.pos ?? 0) - (b.pos ?? 0))
+    .map((s: any) => (s.color || '#000') + ' ' + Math.round(s.pos ?? 0) + '%').join(', ');
+  if (g.type === 'radial') return 'radial-gradient(circle at ' + (g.cx ?? 50) + '% ' + (g.cy ?? 50) + '%, ' + stops + ')';
+  return 'linear-gradient(' + (g.angle ?? 180) + 'deg, ' + stops + ')';
+}
+function rtRadiusCss(n: any) {
+  const r = n.radii;
+  if (Array.isArray(r) && r.some((v: any) => v != null)) {
+    const base = n.radius || 0; const v = (i: number) => (r[i] != null ? r[i] : base);
+    return v(0) + 'px ' + v(1) + 'px ' + v(2) + 'px ' + v(3) + 'px';
+  }
+  return n.radius ? n.radius + 'px' : '';
+}
+function rtEffectCss(n: any) {
+  const out: any = { boxShadow: [], filter: [], backdropFilter: [] };
+  for (const e of n.effects || []) {
+    if (!e || e.on === false) continue;
+    const color = e.color || 'rgba(0,0,0,0.35)';
+    const x = e.x ?? 0, y = e.y ?? 0, blur = e.blur ?? 0, spread = e.spread ?? 0;
+    if (e.type === 'drop') out.boxShadow.push(x + 'px ' + y + 'px ' + blur + 'px ' + spread + 'px ' + color);
+    else if (e.type === 'inner') out.boxShadow.push('inset ' + x + 'px ' + y + 'px ' + blur + 'px ' + spread + 'px ' + color);
+    else if (e.type === 'glow') out.boxShadow.push('0 0 ' + (e.blur ?? 16) + 'px ' + (e.spread ?? 2) + 'px ' + color);
+    else if (e.type === 'blur') out.filter.push('blur(' + (e.blur ?? 4) + 'px)');
+    else if (e.type === 'bgblur') out.backdropFilter.push('blur(' + (e.blur ?? 8) + 'px)');
+  }
+  return out;
 }
 
 // ================= workflow interpreter (from WorkflowEngine, log-free) =================
@@ -534,6 +607,7 @@ export function LNode(props: any) {
       else if (k === 'fillColor') el.style.background = v;
       else if (k === 'textColor') el.style.color = v;
       else if (k === 'borderColor') el.style.borderColor = v;
+      else if (k === 'borderWidth') el.style.borderWidth = v + 'px';
       else if (k === 'radius') el.style.borderRadius = v + 'px';
     }
     if ('rotation' in ov || 'scale' in ov || 'skewX' in ov || 'skewY' in ov || 'flipH' in ov || 'flipV' in ov) {
@@ -546,6 +620,18 @@ export function LNode(props: any) {
       el.style.transform = tf.join(' ');
       el.style.transformOrigin = merged.transformOrigin || 'center';
     }
+    // Derived paint keys — recomputed from the sampled node so animated gradient / effects / per-corner
+    // radii / blend match Preview (which recomputes nodeFx every frame). gradient wins over fillColor.
+    if ('gradient' in ov) el.style.background = rtGradientCss(ov.gradient) || merged.fillColor || '';
+    if ('effects' in ov) {
+      const fx = rtEffectCss(merged);
+      el.style.boxShadow = fx.boxShadow.join(', ');
+      el.style.filter = fx.filter.join(' ');
+      el.style.backdropFilter = fx.backdropFilter.join(' ');
+      (el.style as any).WebkitBackdropFilter = fx.backdropFilter.join(' ');
+    }
+    if ('radii' in ov) el.style.borderRadius = rtRadiusCss(merged) || '';
+    if ('blendMode' in ov) el.style.mixBlendMode = (ov.blendMode && ov.blendMode !== 'normal') ? ov.blendMode : '';
   };
 
   const playAnim = (animId: string, popts?: any) => {
@@ -620,46 +706,22 @@ export function LNode(props: any) {
   // where a forced animation outranks every trigger and holds until another play replaces it.
   const forcedRef = React.useRef(false);
 
-  // Snapshot the element's own inline style (set by React from the baked base style) the first time we
-  // touch it, so reverting a trigger restores its real resting look — not an empty string, which would
-  // wipe palette defaults (e.g. a button's var(--action-solid) background) that aren't in node.base.
-  const origRef = React.useRef<any>(null);
-  const captureOrig = () => {
-    const el = ref.current; if (!el || origRef.current) return;
-    const s = el.style;
-    origRef.current = { background: s.background, color: s.color, borderColor: s.borderColor, borderWidth: s.borderWidth, borderRadius: s.borderRadius, opacity: s.opacity, transform: s.transform, transformOrigin: s.transformOrigin };
-  };
-  // Apply a static pose: merge the override onto base, mutate style, tween via CSS transition. Any
-  // property the pose doesn't set reverts to the element's captured resting value.
-  const applyStatic = (ov: any, timing?: any) => {
+  // Apply a static pose by assigning the state's fully-baked paint style (computed at codegen with the
+  // SAME resolvers Preview uses — nodeBaseStyleObj + mergeState). Assigning the whole style, instead of
+  // mutating a hand-picked subset, keeps border/shadow/gradient/radius/transform in lock-step with the
+  // fill exactly like Preview — so no stale border ring appears on hover. key is a state key
+  // (hoverOn / click / …) or 'default'/null for the resting look. Any paint prop the pose doesn't set is
+  // cleared, reverting to the element's own resting inline style (geometry/typography aren't touched).
+  const PAINT_KEYS = ['background', 'color', 'border', 'borderRadius',
+    'boxShadow', 'filter', 'backdropFilter', 'WebkitBackdropFilter', 'mixBlendMode', 'opacity',
+    'transform', 'transformOrigin', 'overflow', 'clipPath', 'WebkitClipPath'];
+  const applyStatic = (key: any, timing?: any) => {
     const el = ref.current; if (!el) return;
-    captureOrig();
-    ov = ov || {};
-    const b = node.base || {};
-    const o = origRef.current || {};
-    const val = (k: string) => (k in ov ? ov[k] : b[k]);
+    const so: any = (key && key !== 'default' && node.stMap && node.stMap[key]) || node.st0 || {};
     if (timing) el.style.transition = 'all ' + timing.dur + 'ms ' + timing.ease;
-    const fc = val('fillColor'); el.style.background = (fc == null || fc === '') ? (o.background || '') : fc;
-    const tc = val('textColor'); el.style.color = (tc == null || tc === '') ? (o.color || '') : tc;
-    const bc = val('borderColor'); el.style.borderColor = (bc == null || bc === '') ? (o.borderColor || '') : bc;
-    if ('borderWidth' in ov) el.style.borderWidth = ((val('borderWidth') || 0)) + 'px'; else el.style.borderWidth = o.borderWidth || '';
-    const rd = val('radius'); el.style.borderRadius = (rd == null || rd === '') ? (o.borderRadius || '') : rd + 'px';
-    const op = val('opacity'); el.style.opacity = (op == null) ? (o.opacity || '') : String(Math.max(0, Math.min(100, op)) / 100);
-    const hasTf = ('rotation' in ov || 'scale' in ov || 'skewX' in ov || 'skewY' in ov || 'flipH' in ov || 'flipV' in ov
-      || b.rotation != null || b.scale != null || b.skewX != null || b.skewY != null || b.flipH != null || b.flipV != null);
-    if (hasTf) {
-      const m = Object.assign({}, b, ov);
-      const tf: string[] = [];
-      if (m.rotation) tf.push('rotate(' + m.rotation + 'deg)');
-      const sc = (m.scale == null ? 100 : m.scale) / 100;
-      const sx = sc * (m.flipH ? -1 : 1), sy = sc * (m.flipV ? -1 : 1);
-      if (sx !== 1 || sy !== 1) tf.push('scale(' + sx + ', ' + sy + ')');
-      if (m.skewX || m.skewY) tf.push('skew(' + (m.skewX || 0) + 'deg, ' + (m.skewY || 0) + 'deg)');
-      el.style.transform = tf.join(' ') || (o.transform || '');
-      el.style.transformOrigin = m.transformOrigin || o.transformOrigin || 'center';
-    } else {
-      el.style.transform = o.transform || '';
-      if (o.transformOrigin) el.style.transformOrigin = o.transformOrigin;
+    for (let i = 0; i < PAINT_KEYS.length; i++) {
+      const k = PAINT_KEYS[i]; const v = so[k];
+      (el.style as any)[k] = (v == null || v === '') ? '' : v;
     }
   };
 
@@ -685,7 +747,7 @@ export function LNode(props: any) {
     else if (hoverRef.current && usable('hoverOn')) key = 'hoverOn';
     if (key === 'default') {
       if (idleAnimId) { playAnim(idleAnimId, { loop: true }); return; }
-      stop(); applyStatic({}, timingOf('hoverOff')); return;
+      stop(); applyStatic('default', timingOf('hoverOff')); return;
     }
     const aid = animIdOf(key);
     if (aid) {
@@ -693,7 +755,7 @@ export function LNode(props: any) {
       else showAnimEnd(aid);
       return;
     }
-    stop(); applyStatic(overridesOf(key) || {}, timingOf(key));
+    stop(); applyStatic(key, timingOf(key));
   };
 
   // Momentary reaction (click / right-click / drop / hover-off / press-pop): play once, then settle.
@@ -708,7 +770,7 @@ export function LNode(props: any) {
       const dur = (st ? stateDuration(st) : 0) || 300;
       pulseTimer.current = setTimeout(renderSustained, Math.max(80, dur) + 30);
     } else {
-      applyStatic(overridesOf(key) || {}, timingOf(key));
+      applyStatic(key, timingOf(key));
       pulseTimer.current = setTimeout(renderSustained, Math.max(80, timingOf(key).dur) + 30);
     }
   };
@@ -726,7 +788,6 @@ export function LNode(props: any) {
   }, [node.id, layer]);
 
   React.useEffect(() => {
-    captureOrig();                                     // record the element's real resting style first
     if (hasStates || idleAnimId) renderSustained();   // resting pose: idle anim, else base
     else { const au = (node.anim || []).find((s: any) => s.autoplay); if (au) playAnim(au.id); }
     return () => { clearTimeout(holdTimer.current); clearTimeout(pulseTimer.current); };

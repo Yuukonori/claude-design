@@ -41,7 +41,7 @@ const pageCloseStyle = (show) => ({
 });
 const pageAddStyle = { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 33, flex: 'none', border: 0, borderRight: '1px solid var(--border-subtle)', background: 'transparent', color: 'var(--text-muted)', cursor: 'pointer' };
 
-function Topbar({ view, setView, pageName, projectName, saving, onBack, onHelp, previewMode, onTogglePreview, onRun, runState, onStop, onRestart, onPause, device, onSetDevice, responsive = true, desktopPreset, onSetDesktopPreset, artboard, orientation, onToggleOrientation, customSize, onSetCustomSize, onOpenSettings, onShare, onGenerate, dirty, onUndo, onRedo, canUndo, canRedo }) {
+function Topbar({ view, setView, pageName, projectName, saving, onBack, onHelp, previewMode, onTogglePreview, onRun, runState, onStop, onRestart, onPause, device, onSetDevice, responsive = true, desktopPreset, onSetDesktopPreset, artboard, orientation, onToggleOrientation, customSize, onSetCustomSize, onOpenSettings, onShare, onGenerate, dirty, onUndo, onRedo, canUndo, canRedo, aiOpen, onToggleAI }) {
   const DESKTOP_PRESETS = window.DESKTOP_PRESETS || [];
   const { IconButton, Tabs, Button, Tooltip } = window.LatticeDesignSystem_e801cb;
   // Progressive breakpoints — shed breadcrumb/readout chrome so the view tabs never collide.
@@ -174,6 +174,11 @@ function Topbar({ view, setView, pageName, projectName, saving, onBack, onHelp, 
             </Tooltip>
             {runState.debug && <span style={{ fontSize: 11, color: 'var(--amber-base)', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 4 }}><i data-lucide="bug" style={{ width: 12, height: 12 }}></i>{tight ? '' : 'Debug'}</span>}
           </>
+        )}
+        {onToggleAI && (
+          <Tooltip label="AI Helper — ask the assistant (Pro)">
+            <IconButton title="AI Helper" active={aiOpen} onClick={onToggleAI}><i data-lucide="sparkles"></i></IconButton>
+          </Tooltip>
         )}
         <Tooltip label="Keyboard shortcuts (?)">
           <IconButton title="Shortcuts" onClick={onHelp}><i data-lucide="keyboard"></i></IconButton>

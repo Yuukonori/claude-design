@@ -95,6 +95,31 @@ async function initSchema() {
       source TEXT,               -- market item id it was installed from, or 'custom'
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
+    CREATE TABLE IF NOT EXISTS ai_usage (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      tool TEXT NOT NULL,        -- AI Helper tool id that was invoked
+      tokens INTEGER NOT NULL,   -- fixed token cost charged for this call
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS ai_usage_user_idx ON ai_usage(user_id);
+
+    -- What the agent has been observed getting WRONG, so the mistake can be fed back into its prompt.
+    -- Global on purpose (no user_id): these are the model's failure modes, not anyone's taste, and a
+    -- lesson learned from one user's turn is worth having for everybody.
+    -- This lives in Postgres rather than a JSON file because the Render container's filesystem is
+    -- EPHEMERAL — a file written at runtime is wiped on every restart/redeploy, so "learning" would
+    -- silently reset to zero forever. The curated seed still ships as server/learning/lessons.json.
+    CREATE TABLE IF NOT EXISTS ai_lessons (
+      id SERIAL PRIMARY KEY,
+      key TEXT NOT NULL UNIQUE,     -- stable dedupe key, e.g. 'unknownOp:setPageProp:height'
+      stage TEXT NOT NULL,          -- which pipeline stage should be told ('implement', 'prepare', …)
+      text TEXT NOT NULL,           -- the sentence injected into that stage's prompt
+      observations INTEGER NOT NULL DEFAULT 1,   -- evidence: how many times we've seen this mistake
+      last_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS ai_lessons_stage_idx ON ai_lessons(stage, observations DESC);
   `);
 
   // Migration: move identity to GitHub OAuth. Idempotent — safe on an existing (password-era) DB.
@@ -105,6 +130,8 @@ async function initSchema() {
     ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL;
     ALTER TABLE users DROP CONSTRAINT IF EXISTS users_email_key;
     ALTER TABLE users ALTER COLUMN email DROP NOT NULL;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS ai_token_limit INTEGER NOT NULL DEFAULT 500000;
+    ALTER TABLE ai_usage ADD COLUMN IF NOT EXISTS effort TEXT;
   `);
   await query(`CREATE UNIQUE INDEX IF NOT EXISTS users_github_id_key ON users(github_id) WHERE github_id IS NOT NULL`);
 
